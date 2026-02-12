@@ -1,0 +1,70 @@
+# Web框架
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+
+# 数据库
+aiomysql==0.2.0
+sqlalchemy==2.0.25
+alembic==1.13.1
+
+# Redis
+redis==5.0.1
+aioredis==2.0.1
+
+# 认证
+pyjwt==2.8.0
+passlib[bcrypt]==1.7.4
+python-jose[cryptography]==3.3.0
+
+# 任务调度
+apscheduler==3.10.4
+
+# WebSocket
+python-socketio==5.11.0
+python-engineio==4.9.0
+
+# AI模型
+openai==1.10.0
+anthropic==0.8.1
+
+# 向量数据库
+chromadb==0.4.22
+numpy<2.0.0
+
+# 文档解析
+python-docx==1.1.0
+pdfplumber==0.10.3
+pytesseract==0.3.10
+Pillow==10.2.0
+pypdf2==3.0.1
+
+# 文档生成
+weasyprint==60.2
+reportlab==4.0.9
+
+# 繁简转换
+opencc-python-reimplemented==0.1.7
+
+# 对象存储
+minio==7.2.3
+
+# 工具库
+pydantic==2.5.3
+pydantic[email]==2.5.3
+pydantic-settings==2.1.0
+email-validator==2.1.0
+python-dotenv==1.0.0
+httpx==0.26.0
+aiofiles==23.2.1
+tenacity==8.2.3
+
+# 日志
+loguru==0.7.2
+
+# 测试
+pytest==7.4.4
+pytest-asyncio==0.23.3
+pytest-cov==4.1.0
+httpx==0.26.0
+
