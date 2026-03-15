@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>教案格式转换工具</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            text-align: center;
+            padding: 40px 0;
+        }
+        
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+        
+        .card {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            padding: 30px;
+            margin: 20px 0;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .card h3 {
+            font-size: 1.5rem;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        select, input[type="file"] {
+            width: 100%;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+        
+        select option {
+            background: #667eea;
+            color: white;
+        }
+        
+        .format-checkboxes {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .format-checkboxes label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .format-checkboxes label:hover {
+            background: rgba(255, 255, 255, 0.15);
+        }
+        
+        .format-checkboxes input[type="checkbox"] {
+            width: auto;
+            cursor: pointer;
+        }
+        
+        .btn {
+            background: linear-gradient(135deg, #1890ff, #40a9ff);
+            color: white;
+            border: none;
+            padding: 15px 40px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(24, 144, 255, 0.4);
+        }
+        
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .btn-center {
+            text-align: center;
+            margin: 30px 0;
+        }
+        
+        .preview {
+            background: white;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        
+        .preview iframe {
+            width: 100%;
+            height: 800px;
+            border: none;
+        }
+        
+        .download-area {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+        
+        .download-btn {
+            background: linear-gradient(135deg, #52c41a, #73d13d);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            font-weight: 600;
+        }
+        
+        .download-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(82, 196, 26, 0.4);
+        }
+        
+        .message {
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+        }
+        
+        .message.success {
+            background: rgba(82, 196, 26, 0.2);
+            border-left: 4px solid #52c41a;
+        }
+        
+        .message.error {
+            background: rgba(255, 77, 79, 0.2);
+            border-left: 4px solid #ff4d4f;
+        }
+        
+        .message.info {
+            background: rgba(24, 144, 255, 0.2);
+            border-left: 4px solid #1890ff;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+        }
+        
+        .loading i {
+            font-size: 3rem;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            100% { transform: rotate(360deg); }
+        }
+        
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1><i class="fas fa-exchange-alt"></i> 教案格式转换工具</h1>
+            <p>将教案转换为多种格式（HTML/DOCX/MD/TXT/PDF）</p>
+        </div>
+        
+        <div id="messageBox"></div>
+        
+        <!-- 1. 教案选择区 -->
+        <div class="card">
+            <h3><i class="fas fa-file-alt"></i> 选择要转换的教案</h3>
+            <select id="lessonSelect">
+                <option value="">正在加载教案列表...</option>
+            </select>
+            <div style="margin-top: 10px; font-size: 0.9rem; opacity: 0.8;">
+                <i class="fas fa-info-circle"></i> 教案列表来自后端服务（需先在教案生成系统中生成教案）
+            </div>
+        </div>
+        
+        <!-- 2. 模版上传区 -->
+        <div class="card">
+            <h3><i class="fas fa-file-pdf"></i> 上传格式模版（PDF）</h3>
+            <input type="file" accept=".pdf" id="templateFile" />
+            <div style="margin-top: 10px; font-size: 0.9rem; opacity: 0.8;">
+                <i class="fas fa-info-circle"></i> 上传一个标准格式的教案PDF作为样式参考（如：旋轉對稱圖形教案.pdf）
+            </div>
+        </div>
+        
+        <!-- 3. 转换方案选择 -->
+        <div class="card">
+            <h3><i class="fas fa-robot"></i> 转换方案选择</h3>
+            <div style="display: flex; gap: 20px; margin-top: 15px;">
+                <label style="display: flex; align-items: center; gap: 10px; padding: 12px; background: rgba(255, 255, 255, 0.05); border-radius: 8px; cursor: pointer; flex: 1;">
+                    <input type="radio" name="method" value="auto" checked> 
+                    <div>
+                        <strong><i class="fas fa-brain"></i> 智能选择（推荐）</strong>
+                        <div style="font-size: 0.85rem; opacity: 0.8; margin-top: 5px;">自动选择最佳方案：先尝试PDF解析，失败则使用Qwen AI</div>
+                    </div>
+                </label>
+                <label style="display: flex; align-items: center; gap: 10px; padding: 12px; background: rgba(255, 255, 255, 0.05); border-radius: 8px; cursor: pointer; flex: 1;">
+                    <input type="radio" name="method" value="qwen"> 
+                    <div>
+                        <strong><i class="fas fa-magic"></i> 强制使用Qwen AI</strong>
+                        <div style="font-size: 0.85rem; opacity: 0.8; margin-top: 5px;">直接使用AI理解模版格式（适合复杂布局）</div>
+                    </div>
+                </label>
+            </div>
+        </div>
+        
+        <!-- 4. 精确度选择 -->
+        <div class="card">
+            <h3><i class="fas fa-sliders-h"></i> 精确度设置</h3>
+            <div style="display: flex; gap: 20px; margin-top: 15px;">
+                <label style="display: flex; align-items: center; gap: 10px; padding: 12px; background: rgba(255, 255, 255, 0.05); border-radius: 8px; cursor: pointer; flex: 1;">
+                    <input type="radio" name="precision" value="standard" checked> 
+                    <div>
+                        <strong><i class="fas fa-tachometer-alt"></i> 标准模式（推荐）</strong>
+                        <div style="font-size: 0.85rem; opacity: 0.8; margin-top: 5px;">基础样式还原（字体、字号、对齐），速度快 ~1-2秒</div>
+                    </div>
+                </label>
+                <label style="display: flex; align-items: center; gap: 10px; padding: 12px; background: rgba(255, 255, 255, 0.05); border-radius: 8px; cursor: pointer; flex: 1;">
+                    <input type="radio" name="precision" value="precise"> 
+                    <div>
+                        <strong><i class="fas fa-crosshairs"></i> 精确模式</strong>
+                        <div style="font-size: 0.85rem; opacity: 0.8; margin-top: 5px;">像素级精确还原（行距、字间距、缩进、位置），速度较慢 ~3-5秒</div>
+                    </div>
+                </label>
+            </div>
+        </div>
+        
+        <!-- 5. 输出格式选择 -->
+        <div class="card">
+            <h3><i class="fas fa-cog"></i> 选择输出格式</h3>
+            <div class="format-checkboxes">
+                <label>
+                    <input type="checkbox" value="json" checked> 
+                    <i class="fas fa-code"></i> JSON
+                </label>
+                <label>
+                    <input type="checkbox" value="docx" checked> 
+                    <i class="fas fa-file-word"></i> DOCX
+                </label>
+                <label>
+                    <input type="checkbox" value="md" checked> 
+                    <i class="fab fa-markdown"></i> Markdown
+                </label>
+                <label>
+                    <input type="checkbox" value="txt" checked> 
+                    <i class="fas fa-file-alt"></i> TXT
+                </label>
+                <label>
+                    <input type="checkbox" value="pdf" checked> 
+                    <i class="fas fa-file-pdf"></i> PDF
+                </label>
+            </div>
+        </div>
+        
+        <!-- 6. 转换按钮 -->
+        <div class="btn-center">
+            <button class="btn" onclick="convertLesson()" id="convertBtn">
+                <i class="fas fa-magic"></i> 开始转换
+            </button>
+        </div>
+        
+        <!-- 7. 预览区 -->
+        <div class="card hidden" id="previewCard">
+            <h3><i class="fas fa-eye"></i> HTML预览</h3>
+            <div class="preview">
+                <iframe id="previewFrame"></iframe>
+            </div>
+        </div>
+        
+        <!-- 8. 下载区 -->
+        <div class="card hidden" id="downloadCard">
+            <h3><i class="fas fa-download"></i> 下载转换结果</h3>
+            <div class="download-area" id="downloadArea"></div>
+        </div>
+    </div>
+    
+    <script>
+        const API_BASE_URL = 'http://localhost:8000';
+        let currentConversionId = null;
+        
+        // 页面加载时获取教案列表
+        window.addEventListener('DOMContentLoaded', loadLessonPlans);
+        
+        async function loadLessonPlans() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/lesson-plans`);
+                if (!response.ok) {
+                    throw new Error('无法连接到后端服务');
+                }
+                
+                const plans = await response.json();
+                const select = document.getElementById('lessonSelect');
+                
+                if (plans.length === 0) {
+                    select.innerHTML = '<option value="">暂无教案（请先在教案生成系统中生成教案）</option>';
+                    return;
+                }
+                
+                select.innerHTML = '<option value="">-- 请选择教案 --</option>';
+                plans.forEach(plan => {
+                    const option = document.createElement('option');
+                    option.value = plan.id;
+                    option.textContent = `${plan.metadata.courseTitle} - ${plan.metadata.type} (${plan.metadata.generatedAtReadable})`;
+                    select.appendChild(option);
+                });
+                
+                showMessage('教案列表加载成功', 'success');
+            } catch (error) {
+                console.error('加载教案列表失败:', error);
+                showMessage(`加载教案列表失败: ${error.message}。请确保后端服务已启动（python run.py）`, 'error');
+            }
+        }
+        
+        function getSelectedFormats() {
+            const checkboxes = document.querySelectorAll('.format-checkboxes input[type="checkbox"]:checked');
+            return Array.from(checkboxes).map(cb => cb.value);
+        }
+        
+        async function convertLesson() {
+            const lessonId = document.getElementById('lessonSelect').value;
+            const templateFile = document.getElementById('templateFile').files[0];
+            const formats = getSelectedFormats();
+            const method = document.querySelector('input[name="method"]:checked').value;
+            const precision = document.querySelector('input[name="precision"]:checked').value;
+            
+            // 验证输入
+            if (!lessonId) {
+                showMessage('请选择要转换的教案', 'error');
+                return;
+            }
+            
+            if (!templateFile) {
+                showMessage('请上传格式模版PDF', 'error');
+                return;
+            }
+            
+            if (formats.length === 0) {
+                showMessage('请至少选择一种输出格式', 'error');
+                return;
+            }
+            
+            // 禁用按钮
+            const btn = document.getElementById('convertBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 正在转换...';
+            
+            try {
+                // 读取PDF为Base64
+                const base64 = await fileToBase64(templateFile);
+                
+                const methodMsg = method === 'qwen' ? '使用Qwen AI方案' : '使用智能选择方案（先PDF解析，失败则Qwen）';
+                const precisionMsg = precision === 'precise' ? '精确模式（像素级还原）' : '标准模式';
+                showMessage(`正在转换（${methodMsg}，${precisionMsg}），请稍候...`, 'info');
+                
+                // 调用后端
+                const response = await fetch(`${API_BASE_URL}/api/convert`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        lesson_plan_id: lessonId,
+                        template_pdf: base64,
+                        output_formats: formats,
+                        method: method,
+                        precision: precision
+                    })
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || '转换失败');
+                }
+                
+                const result = await response.json();
+                currentConversionId = result.conversion_id;
+                
+                // 显示预览
+                document.getElementById('previewFrame').srcdoc = result.html;
+                document.getElementById('previewCard').classList.remove('hidden');
+                
+                // 生成下载按钮
+                generateDownloadButtons(result.conversion_id, formats);
+                
+                showMessage(`${result.message}。请预览结果或下载文件`, 'success');
+                
+                // 滚动到预览区
+                document.getElementById('previewCard').scrollIntoView({ behavior: 'smooth' });
+                
+            } catch (error) {
+                console.error('转换失败:', error);
+                showMessage(`转换失败: ${error.message}`, 'error');
+            } finally {
+                // 恢复按钮
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-magic"></i> 开始转换';
+            }
+        }
+        
+        function fileToBase64(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(e.target.result.split(',')[1]);
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+            });
+        }
+        
+        function generateDownloadButtons(conversionId, formats) {
+            const downloadArea = document.getElementById('downloadArea');
+            downloadArea.innerHTML = '';
+            
+            const formatIcons = {
+                json: 'fas fa-code',
+                docx: 'fas fa-file-word',
+                md: 'fab fa-markdown',
+                txt: 'fas fa-file-alt',
+                pdf: 'fas fa-file-pdf'
+            };
+            
+            const formatNames = {
+                json: 'JSON',
+                docx: 'DOCX',
+                md: 'Markdown',
+                txt: 'TXT',
+                pdf: 'PDF'
+            };
+            
+            formats.forEach(format => {
+                const btn = document.createElement('a');
+                btn.className = 'download-btn';
+                btn.href = `${API_BASE_URL}/api/download/${format}/${conversionId}`;
+                btn.target = '_blank';
+                btn.innerHTML = `<i class="${formatIcons[format]}"></i> 下载 ${formatNames[format]}`;
+                downloadArea.appendChild(btn);
+            });
+            
+            document.getElementById('downloadCard').classList.remove('hidden');
+        }
+        
+        function showMessage(message, type = 'info') {
+            const messageBox = document.getElementById('messageBox');
+            messageBox.innerHTML = `
+                <div class="message ${type}">
+                    ${message}
+                </div>
+            `;
+            
+            // 3秒后自动隐藏成功消息
+            if (type === 'success') {
+                setTimeout(() => {
+                    messageBox.innerHTML = '';
+                }, 3000);
+            }
+        }
+    </script>
+</body>
+</html>
