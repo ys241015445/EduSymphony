@@ -1,49 +1,98 @@
-"""
-教案相关Schema
-"""
-from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any
+from pydantic import BaseModel
+from typing import Optional, List, Any
 from datetime import datetime
 
-class LessonCreate(BaseModel):
-    """创建教案Schema"""
-    title: str = Field(..., max_length=200)
-    subject: str = Field(..., max_length=50)
-    grade_level: str = Field(..., max_length=50)
-    specific_grade: Optional[str] = None
-    region: str = "mainland"
-    teaching_model_id: str
-    source_type: str  # upload | manual
-    source_content: Optional[str] = None
-    enable_rag: bool = True
 
-class LessonResponse(BaseModel):
-    """教案响应Schema"""
-    id: str
+class LessonCreate(BaseModel):
     title: str
     subject: str
     grade_level: str
+    specific_grade: Optional[str] = None
+    region: str = "mainland"
+    teaching_model_id: Optional[str] = None
+    topic: Optional[str] = None
+    avoid_issues: Optional[str] = None
+    student_type: Optional[str] = None
+    source_type: str
+    source_content: Optional[str] = None
+
+
+class LessonResponse(BaseModel):
+    id: str
+    user_id: str
+    title: str
+    subject: str
+    grade_level: str
+    specific_grade: Optional[str] = None
     region: str
+    teaching_model_id: Optional[str] = None
+    topic: Optional[str] = None
+    avoid_issues: Optional[str] = None
+    student_type: Optional[str] = None
     status: str
     progress: int
     current_stage: int
-    final_content: Optional[Dict[str, Any]] = None
-    created_at: datetime
+    error_message: Optional[str] = None
+    source_type: str
+    parsed_content: Optional[str] = None
+    final_content: Optional[Any] = None
+    started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
-    
+    created_at: Optional[datetime] = None
+
     class Config:
         from_attributes = True
 
+
 class LessonListResponse(BaseModel):
-    """教案列表响应"""
     id: str
     title: str
     subject: str
     grade_level: str
     status: str
     progress: int
-    created_at: datetime
-    
+    teaching_model_id: Optional[str] = None
+    created_at: Optional[datetime] = None
+
     class Config:
         from_attributes = True
 
+
+class DiscussionResponse(BaseModel):
+    id: str
+    lesson_plan_id: str
+    stage: int
+    round: int
+    topic: Optional[str] = None
+    agent_role: str
+    opinion: str
+    votes: Optional[Any] = None
+    pass_rate: Optional[float] = None
+    is_accepted: bool
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class StageRegenerateRequest(BaseModel):
+    version: str = "draft"
+
+
+class AnnotationCreate(BaseModel):
+    section_key: str
+    content: str
+    request_regenerate: bool = False
+
+
+class AnnotationResponse(BaseModel):
+    id: str
+    lesson_plan_id: str
+    user_id: str
+    section_key: str
+    content: str
+    request_regenerate: bool
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
