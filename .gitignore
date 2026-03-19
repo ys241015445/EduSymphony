@@ -8,6 +8,7 @@ __pycache__/
 # Build output
 dist/
 build/
+.next/
 
 # Environment & secrets
 .env
