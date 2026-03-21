@@ -47,6 +47,9 @@ class Settings(BaseSettings):
 
     LOG_LEVEL: str = "INFO"
 
+    # Optional absolute path to a TTF/TTC for PDF export (ReportLab / xhtml2pdf). Env: PDF_CJK_FONT_PATH
+    PDF_CJK_FONT_PATH: str = ""
+
     class Config:
         env_file = ".env"
         case_sensitive = True

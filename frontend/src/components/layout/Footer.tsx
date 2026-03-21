@@ -34,7 +34,7 @@ export default function Footer() {
           </div>
         </div>
         <div className="mt-10 pt-6 border-t border-gray-200 text-center text-xs text-gray-400">
-          &copy; {new Date().getFullYear()} EduSymphony. All rights reserved.
+          &copy; {new Date().getFullYear()} Powered by ZCST Education Research Group. All rights reserved.
         </div>
       </div>
     </footer>

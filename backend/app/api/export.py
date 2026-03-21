@@ -14,6 +14,7 @@ import tempfile
 import traceback
 from loguru import logger
 
+from app.core.config import settings
 from app.core.deps import get_db, get_current_active_user
 from app.core.database import async_session_maker
 from app.models.user import User
@@ -384,7 +385,12 @@ _PDF_FONT_NAME = "Helvetica"
 
 
 def _ensure_pdf_font():
-    """Register a Chinese TTF font with ReportLab (one-time)."""
+    """Register a Chinese font with ReportLab / xhtml2pdf (one-time).
+
+    Docker slim images ship no CJK fonts by default; install e.g. ``fonts-wqy-zenhei``.
+    Debian/Ubuntu WenQuanYi is often ``.ttc`` — older code only scanned ``.ttf``, so PDF
+    fell back to Helvetica and Chinese appeared as garbled squares.
+    """
     global _PDF_FONT_READY, _PDF_FONT_NAME
     if _PDF_FONT_READY:
         return
@@ -401,14 +407,31 @@ def _ensure_pdf_font():
             ("SimSun", os.path.join(fd, "simsun.ttc"), 0),
         ]
     else:
+        env_path = (settings.PDF_CJK_FONT_PATH or "").strip()
+        if env_path and os.path.isfile(env_path):
+            ext = os.path.splitext(env_path)[1].lower()
+            sub = 0 if ext == ".ttc" else None
+            base = os.path.splitext(os.path.basename(env_path))[0]
+            candidates.append((f"EnvCJK-{base}", env_path, sub))
+
+        # Common Linux/Docker paths (fonts-wqy-zenhei → wqy-zenhei.ttc)
+        for name, path, sub in (
+            ("WQY-ZenHei", "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", 0),
+            ("WQY-MicroHei", "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 0),
+        ):
+            candidates.append((name, path, sub))
+
         for d in ("/usr/share/fonts", "/usr/local/share/fonts", os.path.expanduser("~/.fonts")):
             if os.path.isdir(d):
                 for root, _, files in os.walk(d):
                     for f in files:
-                        if f.lower().endswith(".ttf") and any(
-                            k in f.lower() for k in ("noto", "cjk", "wqy", "simhei")
-                        ):
-                            candidates.append((f.split(".")[0], os.path.join(root, f), None))
+                        fl = f.lower()
+                        if not fl.endswith((".ttf", ".ttc")):
+                            continue
+                        if not any(k in fl for k in ("noto", "cjk", "wqy", "simhei", "droid", "sourcehansans")):
+                            continue
+                        sub = 0 if fl.endswith(".ttc") else None
+                        candidates.append((os.path.splitext(f)[0], os.path.join(root, f), sub))
     for name, path, sub in candidates:
         if os.path.isfile(path):
             try:

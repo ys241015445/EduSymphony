@@ -30,6 +30,7 @@ RUN echo "deb https://mirrors.aliyun.com/debian bookworm main contrib non-free n
 RUN apt-get update && apt-get install -y --no-install-recommends \
     nginx supervisor curl gcc g++ \
     pkg-config libcairo2-dev \
+    fonts-wqy-zenhei \
     && rm -rf /var/lib/apt/lists/*
 
 # ---------- 后端 ----------
