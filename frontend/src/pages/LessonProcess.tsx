@@ -62,7 +62,7 @@ export default function LessonProcess() {
   const [stageVotes, setStageVotes] = useState<Record<number, { accepted_role: string; pass_rate: number; agree?: number; disagree?: number }>>({})
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [isComplete, setIsComplete] = useState(false)
-  const startTimeRef = useRef<number>(Date.now())
+  const startTimeRef = useRef<number>(0)
   const centerPanelRef = useRef<HTMLDivElement>(null)
 
   const [streamBuffers, setStreamBuffers] = useState<Record<string, StreamBuffer>>({})
@@ -85,9 +85,13 @@ export default function LessonProcess() {
   const [exporting, setExporting] = useState<string | null>(null)
   const exportMenuRef = useRef<HTMLDivElement>(null)
 
+  // Model reason popover
+  const [modelPopoverKey, setModelPopoverKey] = useState<string | null>(null)
+
   // Styled PDF modal + background task
   const [showStyledPdfModal, setShowStyledPdfModal] = useState(false)
   const [showStyledPdfResult, setShowStyledPdfResult] = useState(false)
+  const [styledPdfDismissed, setStyledPdfDismissed] = useState(false)
   
 
   // Material generation background tasks (one per content version)
@@ -252,8 +256,12 @@ export default function LessonProcess() {
     socket.on('progress_update', (data: any) => {
       if (data.lesson_id !== id) return
 
-      if (data.stage === 'started') {
+      if (data.stage === 'started' && !startTimeRef.current) {
         startTimeRef.current = Date.now()
+      }
+
+      if (data.stage === 'awaiting_confirmation') {
+        fetchLesson(id!)
       }
 
       if (data.stage === 'section_start') {
@@ -422,12 +430,27 @@ export default function LessonProcess() {
   }, [id, fetchLesson, fetchDiscussions])
 
   useEffect(() => {
-    if (isComplete) return
+    if (!currentLesson?.started_at) return
+    const toUtc = (ts: string) => ts.endsWith('Z') || ts.includes('+') ? ts : ts + 'Z'
+    const start = new Date(toUtc(currentLesson.started_at)).getTime()
+    startTimeRef.current = start
+    if (isComplete && currentLesson.completed_at) {
+      const end = new Date(toUtc(currentLesson.completed_at)).getTime()
+      setElapsedSeconds(Math.floor((end - start) / 1000))
+      return
+    }
+    setElapsedSeconds(Math.floor((Date.now() - start) / 1000))
+  }, [currentLesson?.started_at, currentLesson?.completed_at, isComplete])
+
+  useEffect(() => {
+    if (isComplete || !startTimeRef.current) return
     const timer = setInterval(() => {
-      setElapsedSeconds(Math.floor((Date.now() - startTimeRef.current) / 1000))
+      if (startTimeRef.current) {
+        setElapsedSeconds(Math.floor((Date.now() - startTimeRef.current) / 1000))
+      }
     }, 1000)
     return () => clearInterval(timer)
-  }, [isComplete])
+  }, [isComplete, currentLesson?.started_at])
 
   // Auto-scroll center panel
   useEffect(() => {
@@ -610,9 +633,34 @@ export default function LessonProcess() {
               </span>
             </div>
             {activeModels.length > 0 && (
-              <div className="flex items-center gap-1.5 ml-4">
-                {activeModels.map((m) => (
-                  <span key={m.key} className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">{m.name}</span>
+              <div className="flex items-center gap-1.5 ml-4 relative">
+                {activeModels.map((m, i) => (
+                  <div key={m.key} className="relative">
+                    <button
+                      onClick={() => setModelPopoverKey(modelPopoverKey === m.key ? null : m.key)}
+                      className={`text-[10px] font-semibold px-1.5 py-0.5 rounded cursor-pointer transition-colors ${MODEL_BADGE_COLORS[i % MODEL_BADGE_COLORS.length]}`}
+                    >
+                      {m.name}
+                    </button>
+                    {modelPopoverKey === m.key && (
+                      <div className="absolute top-full left-0 mt-1.5 w-64 bg-white rounded-lg border border-gray-200 shadow-xl z-[60] p-3">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className={`text-xs font-semibold px-2 py-0.5 rounded ${MODEL_BADGE_COLORS[i % MODEL_BADGE_COLORS.length]}`}>{m.name}</span>
+                          <button onClick={() => setModelPopoverKey(null)} className="text-gray-400 hover:text-gray-600">
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        <p className="text-xs text-gray-600 leading-relaxed">{m.reason || '基于学科特点和学生认知发展规律推荐此教学模型'}</p>
+                        {m.stages && m.stages.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-1">
+                            {m.stages.map((s) => (
+                              <span key={s} className="text-[9px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">{s}</span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 ))}
               </div>
             )}
@@ -630,6 +678,17 @@ export default function LessonProcess() {
                   {T('process.view_result')}
                 </Button>
               </Link>
+            ) : currentLesson?.status === 'awaiting_confirmation' ? (
+              <Button size="sm" onClick={async () => {
+                if (!id) return
+                try {
+                  await api.post(`/api/v1/lessons/${id}/confirm-step`)
+                  fetchLesson(id)
+                } catch (e) { console.error('Confirm step failed:', e) }
+              }}>
+                <CheckCircle2 className="w-4 h-4 mr-1.5" />
+                确认并继续
+              </Button>
             ) : (
               <div className="flex items-center gap-2">
                 <Loader2 className="w-4 h-4 text-brand-500 animate-spin" />
@@ -640,10 +699,10 @@ export default function LessonProcess() {
         </div>
       </div>
 
-      {/* Main content: 3 columns, each independently scrollable — takes all remaining height */}
+      {/* Main content: 2 columns — takes all remaining height */}
       <div className="flex-1 flex min-h-0">
-        {/* LEFT COLUMN: Lesson info + section nav */}
-        <div className="w-72 flex-shrink-0 border-r border-gray-200 panel-scroll bg-white">
+        {/* LEFT COLUMN: Lesson info + section nav + AI discussion (merged) */}
+        <div className="w-[420px] flex-shrink-0 border-r border-gray-200 panel-scroll bg-white">
           <div className="p-4">
             {/* Lesson info */}
             <div className="mb-4">
@@ -666,7 +725,7 @@ export default function LessonProcess() {
             )}
 
             {/* Section nav */}
-            <div>
+            <div className="mb-4">
               <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">{T('process.sections')}</h3>
               <SectionPanel
                 sections={sections}
@@ -674,10 +733,158 @@ export default function LessonProcess() {
                 onSelect={setActiveSection}
               />
             </div>
+
+            {/* AI Discussion (merged from old right column) */}
+            <div className="border-t border-gray-200 pt-4">
+              <div className="flex items-center gap-4 mb-4 pb-3 border-b border-gray-100">
+                <div className="text-xs text-gray-400 uppercase tracking-wider">
+                  {T('process.sections')} {doneSections}/{totalSections}
+                </div>
+                {isComplete && (
+                  <span className="ml-auto text-xs font-semibold text-green-600 bg-green-50 px-2.5 py-1 rounded-full">
+                    {T('process.completed')}
+                  </span>
+                )}
+              </div>
+
+              {activeSection ? (
+                <div className="space-y-6">
+                  {/* Expert analysis */}
+                  <div>
+                    <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">
+                      {T('process.expert_analysis')}
+                    </h3>
+                    {sections[activeSectionIdx] && (
+                      <p className="text-xs text-gray-600 mb-3 font-medium">
+                        {sections[activeSectionIdx].modelName} — {sections[activeSectionIdx].name}
+                      </p>
+                    )}
+                    <div className="space-y-3">
+                      {activeAnalysisStreams.length > 0 && activeAnalysisStreams.map((buf) => (
+                        <AgentCard
+                          key={`stream-${activeStageNum}-${buf.agentRole}`}
+                          role={buf.agentRole}
+                          streamingText={buf.text}
+                          isStreaming={!buf.done}
+                          provider={buf.provider}
+                        />
+                      ))}
+
+                      {activeAnalysisStreams.length === 0 && sectionDiscussions.map((d) => (
+                        <AgentCard
+                          key={d.id}
+                          role={d.agent_role}
+                          opinion={d.opinion}
+                          isAccepted={d.is_accepted}
+                          votes={d.votes || null}
+                          timestamp={d.created_at ? new Date(d.created_at).toLocaleTimeString('zh-CN', { hour12: false }) : undefined}
+                          onRegenerate={() => handleRegenerateDiscussion(d.id)}
+                          isRegenerating={regeneratingDiscussions.has(d.id)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Expert Voting */}
+                  {expertVoteStreams.length > 0 && (
+                    <div>
+                      <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">
+                        专家投票
+                      </h3>
+                      <div className="space-y-3">
+                        {expertVoteStreams.map((buf) => (
+                          <AgentCard
+                            key={`vote-${activeStageNum}-${buf.agentRole}`}
+                            role={buf.agentRole}
+                            streamingText={buf.text}
+                            isStreaming={!buf.done}
+                            provider={buf.provider}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Vote Result */}
+                  {(voteResultStream || stageVotes[activeStageNum] || (isComplete && sectionDiscussions.some((d) => d.is_accepted))) && (
+                    <div>
+                      <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">
+                        {T('process.vote_discussion')}
+                      </h3>
+                      {voteResultStream && (
+                        <AgentCard
+                          key={`voteresult-${activeStageNum}`}
+                          role="教研主持人"
+                          streamingText={voteResultStream.text}
+                          isStreaming={!voteResultStream.done}
+                        />
+                      )}
+                      {stageVotes[activeStageNum] && (
+                        <div className="mt-3">
+                          <VoteResult
+                            agree={stageVotes[activeStageNum].agree || 3}
+                            disagree={stageVotes[activeStageNum].disagree || 2}
+                            acceptedRole={stageVotes[activeStageNum].accepted_role}
+                            passRate={stageVotes[activeStageNum].pass_rate}
+                          />
+                        </div>
+                      )}
+                      {isComplete && !stageVotes[activeStageNum] && sectionDiscussions.some((d) => d.is_accepted) && (
+                        <div className="mt-3">
+                          {sectionDiscussions.filter((d) => d.is_accepted).map((d) => {
+                            const summary = d.votes?.summary || d.votes || {}
+                            return (
+                              <VoteResult
+                                key={d.id}
+                                agree={summary.agree || 0}
+                                disagree={summary.disagree || 0}
+                                acceptedRole={d.agent_role}
+                                passRate={d.pass_rate || 0}
+                              />
+                            )
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Finalize streaming */}
+                  {finalizeStream && (
+                    <div>
+                      <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">
+                        {T('process.lesson_gen')}
+                      </h3>
+                      <AgentCard
+                        key={`finalize-${activeStageNum}`}
+                        role="教案编写专家"
+                        streamingText={finalizeStream.text}
+                        isStreaming={!finalizeStream.done}
+                      />
+                    </div>
+                  )}
+
+                  {/* Annotation */}
+                  {sections[activeSectionIdx]?.status === 'done' && (
+                    <div className="pt-3 border-t border-gray-100">
+                      <AnnotationEditor
+                        lessonId={id!}
+                        sectionKey={activeSection}
+                        onSubmitted={() => fetchLesson(id!)}
+                      />
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-10 text-gray-400">
+                  <FileText className="w-6 h-6 mb-2" />
+                  <span className="text-xs">选择教学环节查看讨论</span>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
-        {/* CENTER COLUMN: Version tabs at top + Full document view */}
+        {/* RIGHT COLUMN: Version tabs at top + Full document view */}
         <div className="flex-1 flex flex-col min-h-0 min-w-0">
           {/* Version tabs bar (sticky at top of center column) */}
           <div className="flex-shrink-0 border-b border-gray-200 bg-white px-6 py-3">
@@ -987,155 +1194,6 @@ export default function LessonProcess() {
           </div>
         </div>
 
-        {/* RIGHT COLUMN: AI discussion for active section (independently scrollable) */}
-        <div className="w-96 flex-shrink-0 border-l border-gray-200 panel-scroll bg-white">
-          <div className="p-4">
-            <div className="flex items-center gap-4 mb-4 pb-3 border-b border-gray-100">
-              <div className="text-xs text-gray-400 uppercase tracking-wider">
-                {T('process.sections')} {doneSections}/{totalSections}
-              </div>
-              {isComplete && (
-                <span className="ml-auto text-xs font-semibold text-green-600 bg-green-50 px-2.5 py-1 rounded-full">
-                  {T('process.completed')}
-                </span>
-              )}
-            </div>
-
-            {activeSection ? (
-              <div className="space-y-6">
-                {/* Expert analysis */}
-                <div>
-                  <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">
-                    {T('process.expert_analysis')}
-                  </h3>
-                  {sections[activeSectionIdx] && (
-                    <p className="text-xs text-gray-600 mb-3 font-medium">
-                      {sections[activeSectionIdx].modelName} — {sections[activeSectionIdx].name}
-                    </p>
-                  )}
-                  <div className="space-y-3">
-                    {activeAnalysisStreams.length > 0 && activeAnalysisStreams.map((buf) => (
-                      <AgentCard
-                        key={`stream-${activeStageNum}-${buf.agentRole}`}
-                        role={buf.agentRole}
-                        streamingText={buf.text}
-                        isStreaming={!buf.done}
-                        provider={buf.provider}
-                      />
-                    ))}
-
-                    {activeAnalysisStreams.length === 0 && sectionDiscussions.map((d) => (
-                      <AgentCard
-                        key={d.id}
-                        role={d.agent_role}
-                        opinion={d.opinion}
-                        isAccepted={d.is_accepted}
-                        votes={d.votes || null}
-                        timestamp={d.created_at ? new Date(d.created_at).toLocaleTimeString('zh-CN', { hour12: false }) : undefined}
-                        onRegenerate={() => handleRegenerateDiscussion(d.id)}
-                        isRegenerating={regeneratingDiscussions.has(d.id)}
-                      />
-                    ))}
-                  </div>
-                </div>
-
-                {/* Expert Voting */}
-                {expertVoteStreams.length > 0 && (
-                  <div>
-                    <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">
-                      专家投票
-                    </h3>
-                    <div className="space-y-3">
-                      {expertVoteStreams.map((buf) => (
-                        <AgentCard
-                          key={`vote-${activeStageNum}-${buf.agentRole}`}
-                          role={buf.agentRole}
-                          streamingText={buf.text}
-                          isStreaming={!buf.done}
-                          provider={buf.provider}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Vote Result */}
-                {(voteResultStream || stageVotes[activeStageNum] || (isComplete && sectionDiscussions.some((d) => d.is_accepted))) && (
-                  <div>
-                    <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">
-                      {T('process.vote_discussion')}
-                    </h3>
-                    {voteResultStream && (
-                      <AgentCard
-                        key={`voteresult-${activeStageNum}`}
-                        role="教研主持人"
-                        streamingText={voteResultStream.text}
-                        isStreaming={!voteResultStream.done}
-                      />
-                    )}
-                    {stageVotes[activeStageNum] && (
-                      <div className="mt-3">
-                        <VoteResult
-                          agree={stageVotes[activeStageNum].agree || 3}
-                          disagree={stageVotes[activeStageNum].disagree || 2}
-                          acceptedRole={stageVotes[activeStageNum].accepted_role}
-                          passRate={stageVotes[activeStageNum].pass_rate}
-                        />
-                      </div>
-                    )}
-                    {isComplete && !stageVotes[activeStageNum] && sectionDiscussions.some((d) => d.is_accepted) && (
-                      <div className="mt-3">
-                        {sectionDiscussions.filter((d) => d.is_accepted).map((d) => {
-                          const summary = d.votes?.summary || d.votes || {}
-                          return (
-                            <VoteResult
-                              key={d.id}
-                              agree={summary.agree || 0}
-                              disagree={summary.disagree || 0}
-                              acceptedRole={d.agent_role}
-                              passRate={d.pass_rate || 0}
-                            />
-                          )
-                        })}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Finalize streaming */}
-                {finalizeStream && (
-                  <div>
-                    <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">
-                      {T('process.lesson_gen')}
-                    </h3>
-                    <AgentCard
-                      key={`finalize-${activeStageNum}`}
-                      role="教案编写专家"
-                      streamingText={finalizeStream.text}
-                      isStreaming={!finalizeStream.done}
-                    />
-                  </div>
-                )}
-
-                {/* Annotation */}
-                {sections[activeSectionIdx]?.status === 'done' && (
-                  <div className="pt-3 border-t border-gray-100">
-                    <AnnotationEditor
-                      lessonId={id!}
-                      sectionKey={activeSection}
-                      onSubmitted={() => fetchLesson(id!)}
-                    />
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="flex flex-col items-center justify-center py-16 text-gray-400">
-                <FileText className="w-8 h-8 mb-3" />
-                <span className="text-sm">选择左侧教学环节查看讨论</span>
-              </div>
-            )}
-          </div>
-        </div>
       </div>
 
       {/* Styled PDF Modal */}
@@ -1224,7 +1282,7 @@ export default function LessonProcess() {
             </div>
           )}
 
-          {styledPdfTask.status === 'done' && !showStyledPdfResult && (
+          {styledPdfTask.status === 'done' && !showStyledPdfResult && !styledPdfDismissed && (
             <div className="flex items-center gap-3 bg-white border border-green-200 shadow-lg rounded-xl px-4 py-3 cursor-pointer hover:shadow-xl transition-shadow"
               onClick={() => setShowStyledPdfResult(true)}
             >
@@ -1234,7 +1292,7 @@ export default function LessonProcess() {
                 <p className="text-xs text-indigo-600 font-medium">点击查看和下载</p>
               </div>
               <button
-                onClick={(e) => { e.stopPropagation(); setShowStyledPdfResult(false) }}
+                onClick={(e) => { e.stopPropagation(); setStyledPdfDismissed(true) }}
                 className="ml-2 p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600"
               >
                 <X className="w-3.5 h-3.5" />
@@ -1379,10 +1437,13 @@ function ModelRecommendationCard({
   overallReason?: string
 }) {
   const hasFinished = !isStreaming && models.length > 0
+  const model = hasFinished ? models[0] : null
+  const [showReason, setShowReason] = useState(false)
+  const reasonText = overallReason || model?.reason || ''
 
   return (
     <div className="mb-4">
-      <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">教学模型分析</h3>
+      <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">AI 选用教学模型</h3>
       <div className="rounded-lg border border-gray-200 bg-white overflow-hidden">
         {isStreaming && (
           <div className="p-3 text-xs text-gray-600 leading-relaxed whitespace-pre-wrap max-h-48 overflow-y-auto">
@@ -1391,32 +1452,121 @@ function ModelRecommendationCard({
           </div>
         )}
 
-        {hasFinished && (
+        {hasFinished && model && (
           <div className="p-3 space-y-2.5">
-            {overallReason && (
-              <p className="text-[11px] text-gray-500 leading-relaxed bg-gray-50 rounded px-2.5 py-2">
-                {overallReason}
-              </p>
-            )}
-            {models.map((m, i) => (
-              <div key={m.key} className="space-y-1">
-                <div className="flex items-center gap-1.5">
-                  <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${MODEL_BADGE_COLORS[i % MODEL_BADGE_COLORS.length]}`}>
-                    {m.name}
+            <div className="flex items-center justify-between">
+              <span className={`text-xs font-semibold px-2 py-1 rounded ${MODEL_BADGE_COLORS[0]}`}>
+                {model.name}
+              </span>
+              {reasonText && (
+                <button
+                  onClick={() => setShowReason(true)}
+                  className="flex items-center gap-1 text-[11px] text-brand-600 hover:text-brand-700 font-medium transition-colors"
+                >
+                  <Eye className="w-3 h-3" />
+                  查看选用原因
+                </button>
+              )}
+            </div>
+
+            <div>
+              <p className="text-[10px] text-gray-400 mb-1">教学阶段</p>
+              <div className="flex flex-wrap gap-1">
+                {model.stages.map((stage, j) => (
+                  <span key={stage} className="text-[9px] text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">
+                    {j + 1}. {stage}
                   </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showReason && model && reasonText && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-black/50 backdrop-blur-[6px]" onClick={() => setShowReason(false)} />
+            <div className="relative w-[460px] max-w-full max-h-[85vh] flex flex-col rounded-2xl overflow-hidden shadow-[0_25px_60px_-12px_rgba(0,0,0,0.3)]">
+              {/* 顶部渐变头 */}
+              <div className="relative bg-gradient-to-br from-violet-600 via-brand-600 to-indigo-600 px-6 py-5">
+                <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,255,255,0.15),transparent_70%)]" />
+                <button
+                  onClick={() => setShowReason(false)}
+                  className="absolute top-3 right-3 p-1.5 rounded-full bg-white/15 hover:bg-white/25 text-white/80 hover:text-white transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+                <div className="relative flex items-center gap-3 mb-3">
+                  <div className="w-9 h-9 rounded-xl bg-white/20 flex items-center justify-center">
+                    <BookOpen className="w-5 h-5 text-white" />
+                  </div>
+                  <div>
+                    <h3 className="text-white font-semibold text-[15px]">AI 模型选用分析</h3>
+                    <p className="text-white/60 text-[11px]">基于学科特点与认知规律智能推荐</p>
+                  </div>
                 </div>
-                {m.reason && (
-                  <p className="text-[10px] text-gray-500 leading-relaxed pl-0.5">{m.reason}</p>
-                )}
-                <div className="flex flex-wrap gap-1 pl-0.5">
-                  {m.stages.map((stage) => (
-                    <span key={stage} className="text-[9px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">
-                      {stage}
-                    </span>
-                  ))}
+                <div className="relative inline-flex items-center gap-1.5 bg-white/20 backdrop-blur-sm rounded-lg px-3 py-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-300 animate-pulse" />
+                  <span className="text-white font-semibold text-xs">{model.name}</span>
                 </div>
               </div>
-            ))}
+
+              {/* 内容区 */}
+              <div className="flex-1 bg-white overflow-y-auto">
+                {/* 选用原因 */}
+                <div className="px-6 py-5 border-b border-gray-100">
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="w-1 h-4 rounded-full bg-brand-500" />
+                    <p className="text-xs font-semibold text-gray-800 tracking-wide">选用原因</p>
+                  </div>
+                  <p className="text-[13px] text-gray-600 leading-[1.8] pl-3">{reasonText}</p>
+                </div>
+
+                {/* 模型特点 */}
+                {model.reason && overallReason && model.reason !== overallReason && (
+                  <div className="px-6 py-5 border-b border-gray-100">
+                    <div className="flex items-center gap-2 mb-3">
+                      <span className="w-1 h-4 rounded-full bg-violet-500" />
+                      <p className="text-xs font-semibold text-gray-800 tracking-wide">模型特点</p>
+                    </div>
+                    <p className="text-[13px] text-gray-600 leading-[1.8] pl-3">{model.reason}</p>
+                  </div>
+                )}
+
+                {/* 教学阶段 */}
+                <div className="px-6 py-5">
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-2">
+                      <span className="w-1 h-4 rounded-full bg-indigo-500" />
+                      <p className="text-xs font-semibold text-gray-800 tracking-wide">教学阶段</p>
+                    </div>
+                    <span className="text-[10px] font-medium text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">共 {model.stages.length} 个阶段</span>
+                  </div>
+                  <div className="relative pl-3">
+                    <div className="absolute left-[12px] top-2 bottom-2 w-px bg-gradient-to-b from-brand-200 via-violet-200 to-indigo-200" />
+                    <div className="space-y-3">
+                      {model.stages.map((stage, j) => (
+                        <div key={stage} className="flex items-center gap-3 group">
+                          <span className="relative z-10 w-6 h-6 rounded-full bg-gradient-to-br from-brand-500 to-violet-500 text-white text-[10px] font-bold flex items-center justify-center flex-shrink-0 shadow-sm group-hover:scale-110 transition-transform">
+                            {j + 1}
+                          </span>
+                          <span className="text-[13px] text-gray-700 group-hover:text-gray-900 transition-colors">{stage}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 底部 */}
+              <div className="bg-gray-50 border-t border-gray-100 px-6 py-3 flex justify-end">
+                <button
+                  onClick={() => setShowReason(false)}
+                  className="px-5 py-2 text-xs font-medium text-white bg-gradient-to-r from-brand-600 to-violet-600 rounded-lg hover:shadow-md hover:shadow-brand-200/50 transition-all"
+                >
+                  我知道了
+                </button>
+              </div>
+            </div>
           </div>
         )}
 

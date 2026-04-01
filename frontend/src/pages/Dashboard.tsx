@@ -1,20 +1,22 @@
 import { useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useLessonStore, LessonSummary } from '../stores/lessonStore'
+import { useT } from '../i18n/translations'
 import Header from '../components/layout/Header'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
-import { Plus, FileText, Clock, CheckCircle2, AlertCircle, Loader2, Trash2, Zap } from 'lucide-react'
+import { Plus, FileText, Clock, CheckCircle2, AlertCircle, Loader2, Trash2, Zap, BookOpen } from 'lucide-react'
 
-const statusConfig: Record<string, { label: string; color: string; icon: any }> = {
-  queued: { label: '排队中', color: 'text-yellow-600 bg-yellow-50', icon: Clock },
-  processing: { label: '生成中', color: 'text-blue-600 bg-blue-50', icon: Loader2 },
-  completed: { label: '已完成', color: 'text-green-600 bg-green-50', icon: CheckCircle2 },
-  failed: { label: '失败', color: 'text-red-600 bg-red-50', icon: AlertCircle },
-  draft: { label: '草稿', color: 'text-gray-600 bg-gray-50', icon: FileText },
+const statusConfig: Record<string, { labelKey: string; color: string; icon: any }> = {
+  queued: { labelKey: 'dashboard.status.queued', color: 'text-yellow-600 bg-yellow-50', icon: Clock },
+  processing: { labelKey: 'dashboard.status.processing', color: 'text-blue-600 bg-blue-50', icon: Loader2 },
+  completed: { labelKey: 'dashboard.status.completed', color: 'text-green-600 bg-green-50', icon: CheckCircle2 },
+  failed: { labelKey: 'dashboard.status.failed', color: 'text-red-600 bg-red-50', icon: AlertCircle },
+  draft: { labelKey: 'dashboard.status.draft', color: 'text-gray-600 bg-gray-50', icon: FileText },
 }
 
 function LessonCard({ lesson }: { lesson: LessonSummary }) {
+  const t = useT()
   const { deleteLesson, fetchLessons } = useLessonStore()
   const navigate = useNavigate()
   const cfg = statusConfig[lesson.status] || statusConfig.draft
@@ -30,7 +32,7 @@ function LessonCard({ lesson }: { lesson: LessonSummary }) {
 
   const handleDelete = async (e: React.MouseEvent) => {
     e.stopPropagation()
-    if (window.confirm('确定要删除这份教案吗？')) {
+    if (window.confirm(t('dashboard.confirm_delete'))) {
       await deleteLesson(lesson.id)
       fetchLessons()
     }
@@ -42,7 +44,7 @@ function LessonCard({ lesson }: { lesson: LessonSummary }) {
         <div className="flex items-start justify-between mb-3">
           <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${cfg.color}`}>
             <Icon className="w-3.5 h-3.5" />
-            {cfg.label}
+            {t(cfg.labelKey)}
           </div>
           <button
             onClick={handleDelete}
@@ -68,7 +70,7 @@ function LessonCard({ lesson }: { lesson: LessonSummary }) {
         )}
         {lesson.created_at && (
           <p className="text-xs text-gray-400 mt-3">
-            {new Date(lesson.created_at).toLocaleDateString('zh-CN')}
+            {new Date(lesson.created_at).toLocaleDateString()}
           </p>
         )}
       </div>
@@ -77,6 +79,7 @@ function LessonCard({ lesson }: { lesson: LessonSummary }) {
 }
 
 export default function Dashboard() {
+  const t = useT()
   const { lessons, loading, fetchLessons } = useLessonStore()
 
   useEffect(() => {
@@ -89,20 +92,26 @@ export default function Dashboard() {
       <main className="max-w-7xl mx-auto px-6 py-8">
         <div className="flex items-center justify-between mb-8">
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">我的教案</h1>
-            <p className="text-sm text-gray-500 mt-1">管理和查看您生成的所有教案</p>
+            <h1 className="text-2xl font-bold text-gray-900">{t('dashboard.title')}</h1>
+            <p className="text-sm text-gray-500 mt-1">{t('dashboard.subtitle')}</p>
           </div>
           <div className="flex items-center gap-3">
             <Link to="/quick-generate">
               <Button variant="secondary" className="!border-amber-300 !text-amber-700 !bg-amber-50 hover:!bg-amber-100">
                 <Zap className="w-4 h-4 mr-1.5" />
-                快速生成
+                {t('dashboard.quick')}
+              </Button>
+            </Link>
+            <Link to="/series/new">
+              <Button variant="secondary" className="!border-violet-300 !text-violet-700 !bg-violet-50 hover:!bg-violet-100">
+                <BookOpen className="w-4 h-4 mr-1.5" />
+                {t('dashboard.series')}
               </Button>
             </Link>
             <Link to="/lesson/new">
               <Button>
                 <Plus className="w-4 h-4 mr-1.5" />
-                新建教案
+                {t('dashboard.new')}
               </Button>
             </Link>
           </div>
@@ -111,24 +120,24 @@ export default function Dashboard() {
         {loading ? (
           <div className="text-center py-20">
             <Loader2 className="w-8 h-8 text-brand-500 animate-spin mx-auto" />
-            <p className="mt-3 text-gray-500 text-sm">加载中...</p>
+            <p className="mt-3 text-gray-500 text-sm">{t('dashboard.loading')}</p>
           </div>
         ) : lessons.length === 0 ? (
           <div className="text-center py-20">
             <FileText className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-            <h3 className="text-lg font-medium text-gray-600 mb-2">还没有教案</h3>
-            <p className="text-sm text-gray-400 mb-6">创建您的第一份AI协作教案</p>
+            <h3 className="text-lg font-medium text-gray-600 mb-2">{t('dashboard.empty_title')}</h3>
+            <p className="text-sm text-gray-400 mb-6">{t('dashboard.empty_desc')}</p>
             <div className="flex items-center justify-center gap-3">
               <Link to="/quick-generate">
                 <Button variant="secondary" className="!border-amber-300 !text-amber-700 !bg-amber-50 hover:!bg-amber-100">
                   <Zap className="w-4 h-4 mr-1.5" />
-                  快速生成
+                  {t('dashboard.quick')}
                 </Button>
               </Link>
               <Link to="/lesson/new">
                 <Button>
                   <Plus className="w-4 h-4 mr-1.5" />
-                  新建教案
+                  {t('dashboard.new')}
                 </Button>
               </Link>
             </div>

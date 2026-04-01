@@ -11,41 +11,42 @@ from loguru import logger
 from app.core.database import async_session_maker
 from app.models.lesson import LessonPlan, Discussion, LessonStatus
 from app.services.ai_service import AIService
+from app.services.memory_service import MemoryService
 
 AGENT_ROLES = [
     {
         "role": "教案优化专家",
         "focus": "教学流程设计、目标对齐、教学方法优化",
         "specialty": "教案优化",
-        "theories": "精通多种教学模型和教学理论，擅长将多种理论融合应用于教案设计",
+        "theories": "精通各类教学模型和教学理论，擅长根据所选模型优化教案设计",
         "preferred_provider": "qwen",
     },
     {
         "role": "学生参与专家",
         "focus": "学生参与度、互动设计、学习体验提升",
         "specialty": "学生参与",
-        "theories": "精通多种教学模型和教学理论，擅长运用教学理论提升学生课堂参与和互动",
+        "theories": "精通各类教学模型和教学理论，擅长运用所选教学模型提升学生课堂参与和互动",
         "preferred_provider": "kimi",
     },
     {
         "role": "创新教学专家",
         "focus": "创新教学方法、项目式学习、现代教学技术应用",
         "specialty": "创新教学",
-        "theories": "精通多种教学模型和教学理论，擅长结合教学理论进行教学创新",
+        "theories": "精通各类教学模型和教学理论，擅长结合所选教学模型进行教学创新",
         "preferred_provider": "doubao",
     },
     {
         "role": "深度学习专家",
         "focus": "概念理解、知识迁移、深层次学习能力培养",
         "specialty": "深度学习",
-        "theories": "精通多种教学模型和教学理论，擅长利用教学理论促进深层次学习",
+        "theories": "精通各类教学模型和教学理论，擅长利用所选教学模型促进深层次学习",
         "preferred_provider": "deepseek",
     },
     {
         "role": "认知发展专家",
         "focus": "学生认知规律、思维训练、知识建构科学性",
         "specialty": "认知发展",
-        "theories": "精通多种教学模型和教学理论，擅长基于认知科学整合多种理论",
+        "theories": "精通各类教学模型和教学理论，擅长基于认知科学和所选模型指导教学",
         "preferred_provider": "spark",
     },
 ]
@@ -69,31 +70,72 @@ def _build_discussion_stages_for(active_models: List[Dict]) -> List[Dict]:
 
 
 def _build_theories_framework(active_models: List[Dict]) -> str:
-    """Build teaching theory framework description from Qwen's recommended models."""
-    cn_nums = ["一", "二", "三", "四", "五", "六", "七", "八"]
-    lines = [f"【教学理论框架（本教案综合融合运用，共{len(active_models)}种教学模型）】\n"]
-    for i, model in enumerate(active_models):
-        num_label = cn_nums[i] if i < len(cn_nums) else str(i + 1)
-        lines.append(f"{num_label}、{model['name']}")
-        if model.get("reason"):
-            lines.append(f"  推荐理由：{model['reason']}")
-        lines.append("  教学阶段：")
-        for j, stage in enumerate(model["stages"], 1):
-            lines.append(f"    {j}. {stage}")
-        lines.append("")
-    model_names = "、".join(m["name"] for m in active_models)
-    lines.append(f"【融合理念】：以上{len(active_models)}种教学模型（{model_names}）不是分开使用，而是有机整合在教学的每个环节中。")
+    """Build teaching theory framework description from the single recommended model."""
+    if not active_models:
+        return ""
+    model = active_models[0]
+    lines = [
+        f"【教学理论框架】",
+        f"本教案采用「{model['name']}」教学模型。",
+    ]
+    if model.get("reason"):
+        lines.append(f"选用理由：{model['reason']}")
+    lines.append("教学阶段：")
+    for j, stage in enumerate(model["stages"], 1):
+        lines.append(f"  {j}. {stage}")
+    lines.append(f"\n请严格按照「{model['name']}」的上述阶段顺序组织教学流程。")
     return "\n".join(lines)
 
 
 def _build_stages_description_for(active_models: List[Dict]) -> str:
-    """Build stages description block from active models."""
-    lines = [f"【教学环节（融合{len(active_models)}种教学模型）】"]
-    for model in active_models:
-        lines.append(f"\n{model['name']}:")
-        for s in model["stages"]:
-            lines.append(f"  - {s}")
+    """Build stages description block from the single selected model."""
+    if not active_models:
+        return ""
+    model = active_models[0]
+    lines = [f"【教学环节（{model['name']}）】"]
+    for s in model["stages"]:
+        lines.append(f"  - {s}")
     return "\n".join(lines)
+
+
+KNOWN_MODEL_STAGES: Dict[str, List[str]] = {
+    "5e": ["参与(Engage)", "探索(Explore)", "解释(Explain)", "精致化(Elaborate)", "评价(Evaluate)"],
+    "boppps": ["导入(Bridge-in)", "目标(Objective)", "前测(Pre-assessment)",
+               "参与式学习(Participatory)", "后测(Post-assessment)", "总结(Summary)"],
+    "pbl": ["问题情境", "任务设计", "自主/合作探究", "成果展示", "反思评价"],
+    "addie": ["分析(Analysis)", "设计(Design)", "开发(Development)", "实施(Implementation)", "评估(Evaluation)"],
+    "flipped": ["课前自主学习", "课中内化吸收", "课中协作探究", "课后巩固拓展"],
+    "situational": ["创设情境", "确定问题", "自主学习", "协作学习", "效果评价"],
+    "task_based": ["任务前(Pre-task)", "任务中(Task cycle)", "任务后(Post-task)"],
+    "scaffolding": ["搭建脚手架", "进入情境", "独立探索", "协作学习", "效果评价"],
+    "cooperative": ["组建小组", "明确任务", "合作探究", "展示交流", "评价反思"],
+    "deep_learning": ["深度导入", "深度体验", "深度探究", "深度建构", "深度评价"],
+    "unit_design": ["单元目标设定", "学情分析", "内容整合", "活动设计", "多元评价"],
+}
+
+
+def _get_known_model_stages(key: str, name: str) -> List[str]:
+    """Return known stages for common teaching models based on key or name."""
+    key_lower = key.lower()
+    name_lower = name.lower() if name else ""
+    for model_key, stages in KNOWN_MODEL_STAGES.items():
+        if model_key in key_lower or model_key in name_lower:
+            return list(stages)
+    if "5e" in name_lower:
+        return list(KNOWN_MODEL_STAGES["5e"])
+    if "boppps" in name_lower:
+        return list(KNOWN_MODEL_STAGES["boppps"])
+    if "pbl" in name_lower or "项目" in name_lower:
+        return list(KNOWN_MODEL_STAGES["pbl"])
+    if "翻转" in name_lower or "flip" in name_lower:
+        return list(KNOWN_MODEL_STAGES["flipped"])
+    if "情境" in name_lower:
+        return list(KNOWN_MODEL_STAGES["situational"])
+    if "支架" in name_lower:
+        return list(KNOWN_MODEL_STAGES["scaffolding"])
+    if "合作" in name_lower or "cooperative" in name_lower:
+        return list(KNOWN_MODEL_STAGES["cooperative"])
+    return ["导入", "新授", "实践", "巩固", "总结"]
 
 
 def _parse_model_recommendation(raw_text: str) -> dict:
@@ -110,39 +152,47 @@ def _parse_model_recommendation(raw_text: str) -> dict:
 
     try:
         data = json.loads(json_str)
+        if not isinstance(data, dict):
+            raise ValueError("parsed JSON is not a dict")
         if "selected_models" in data and isinstance(data["selected_models"], list):
+            valid_models = []
             for m in data["selected_models"]:
+                if not isinstance(m, dict):
+                    continue
                 if "key" not in m:
                     m["key"] = re.sub(r'[^a-z0-9_]', '_', m.get("name", "model").lower())[:20]
-                if "stages" not in m or not isinstance(m["stages"], list):
-                    m["stages"] = ["阶段1", "阶段2", "阶段3"]
+                if "stages" not in m or not isinstance(m["stages"], list) or len(m["stages"]) == 0:
+                    m["stages"] = _get_known_model_stages(m.get("key", ""), m.get("name", ""))
+                else:
+                    known = _get_known_model_stages(m.get("key", ""), m.get("name", ""))
+                    if len(m["stages"]) < len(known):
+                        logger.warning(f"AI returned {len(m['stages'])} stages for {m.get('name')}, expected {len(known)}, using known stages")
+                        m["stages"] = known
                 if "name" not in m:
                     m["name"] = m["key"]
                 if "reason" not in m:
                     m["reason"] = ""
+                valid_models.append(m)
+            data["selected_models"] = valid_models[:1]
+            if not data["selected_models"]:
+                raise ValueError("empty selected_models")
             if not data.get("overall_reason"):
-                data["overall_reason"] = "基于学科特点和学生认知发展规律推荐以下教学模型组合。"
+                m0 = data["selected_models"][0]
+                data["overall_reason"] = f"基于学科特点和学生认知发展规律，推荐采用{m0['name']}。"
             return data
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, ValueError, TypeError, KeyError, AttributeError):
         pass
 
     logger.warning("Failed to parse model recommendation JSON, using fallback")
     return {
-        "overall_reason": "基于学科特点和学生认知发展规律，推荐以下教学模型组合。",
+        "overall_reason": "基于学科特点和学生认知发展规律，推荐BOPPPS教学模型，其结构化的六步教学流程适合系统性知识传授。",
         "selected_models": [
             {
                 "key": "boppps",
                 "name": "BOPPPS教学模型",
-                "reason": "结构化教学流程，适合系统性知识传授",
+                "reason": "BOPPPS模型的六步结构化教学流程（导入-目标-前测-参与式学习-后测-总结）适合系统性知识传授，能确保教学目标明确、评价完整。",
                 "stages": ["导入(Bridge-in)", "目标(Objective)", "前测(Pre-assessment)",
                            "参与式学习(Participatory)", "后测(Post-assessment)", "总结(Summary)"],
-            },
-            {
-                "key": "5e",
-                "name": "5E教学模型",
-                "reason": "强调探究式学习，适合科学素养培养",
-                "stages": ["引入(Engage)", "探索(Explore)", "解释(Explain)",
-                           "拓展(Extend)", "评价(Evaluate)"],
             },
         ],
     }
@@ -226,7 +276,16 @@ def _is_macau_or_hk(region: str) -> bool:
     return region.lower() in ('macau', 'hongkong', '澳门', '香港', 'macao')
 
 
-def _build_context(lesson: LessonPlan) -> str:
+LOCALE_INSTRUCTION = {
+    "zh-CN": "",
+    "zh-TW": "\n\n【語言要求】請全程使用繁體中文（台灣用語習慣）撰寫所有教案內容。",
+    "en": "\n\n[Language Requirement] Please write all lesson plan content entirely in English.",
+}
+
+def _locale_hint(lesson: LessonPlan) -> str:
+    return LOCALE_INSTRUCTION.get(getattr(lesson, "locale", None) or "zh-CN", "")
+
+def _build_context(lesson: LessonPlan, parent_content: str = "") -> str:
     parts = [f"教案标题: {lesson.title}", f"学科: {lesson.subject}", f"学段: {lesson.grade_level}"]
     if lesson.specific_grade:
         parts.append(f"具体年级: {lesson.specific_grade}")
@@ -236,6 +295,10 @@ def _build_context(lesson: LessonPlan) -> str:
         parts.append(f"学生类别: {lesson.student_type}")
     if lesson.avoid_issues:
         parts.append(f"需要避免的问题: {lesson.avoid_issues}")
+    if lesson.teacher_feedback:
+        parts.append(f"\n【教师反馈（上一课）】:\n{lesson.teacher_feedback}")
+    if parent_content:
+        parts.append(f"\n【上一课教案摘要】:\n{parent_content[:2000]}")
     parts.append(f"\n教案内容:\n{(lesson.parsed_content or lesson.source_content or '')[:3000]}")
     return "\n".join(parts)
 
@@ -245,6 +308,7 @@ def _build_context(lesson: LessonPlan) -> str:
 class LessonTaskHandler:
     def __init__(self):
         self.ai_service = AIService()
+        self.memory_service = MemoryService(ai_service=self.ai_service)
         self._assign_providers()
 
     def _assign_providers(self):
@@ -281,7 +345,14 @@ class LessonTaskHandler:
                     "progress": 0, "stage": "started",
                 }, room)
 
-                context = _build_context(lesson)
+                parent_content = ""
+                if lesson.parent_lesson_id:
+                    parent = await self._get_lesson(session, lesson.parent_lesson_id)
+                    if parent and parent.final_content:
+                        fc_parent = parent.final_content if isinstance(parent.final_content, dict) else {}
+                        parent_content = fc_parent.get("full_optimized", "") or fc_parent.get("full_draft", "")
+
+                context = _build_context(lesson, parent_content)
 
                 # ════════════════════════════════════════
                 # PHASE 0: Qwen deep analysis → recommend teaching models
@@ -298,6 +369,18 @@ class LessonTaskHandler:
                 lesson.final_content = {"model_recommendation": model_rec}
                 lesson.progress = 10
                 await session.commit()
+
+                if lesson.mode == "semi_auto":
+                    lesson.status = LessonStatus.AWAITING_CONFIRMATION.value
+                    lesson.current_phase = "model_recommendation_done"
+                    await session.commit()
+                    await _emit("progress_update", {
+                        "lesson_id": lesson_id, "status": "awaiting_confirmation",
+                        "progress": 10, "stage": "awaiting_confirmation",
+                        "phase": "model_recommendation_done",
+                        "message": "模型分析完成，等待教师确认",
+                    }, room)
+                    return
 
                 discussion_stages = _build_discussion_stages_for(active_models)
                 total_discussion = len(discussion_stages)
@@ -356,6 +439,17 @@ class LessonTaskHandler:
                 }, room)
                 logger.info(f"[{lesson_id}] PHASE 1 complete, draft length: {len(full_draft)}")
 
+                if lesson.mode == "semi_auto":
+                    lesson.status = LessonStatus.AWAITING_CONFIRMATION.value
+                    lesson.current_phase = "draft_done"
+                    await session.commit()
+                    await _emit("progress_update", {
+                        "lesson_id": lesson_id, "status": "awaiting_confirmation",
+                        "progress": 40, "stage": "awaiting_confirmation",
+                        "phase": "draft_done", "message": "初步教案已生成，等待教师确认",
+                    }, room)
+                    return
+
                 # ════════════════════════════════════════
                 # PHASE 2: AI teacher discussion per model per stage (dynamic count)
                 # ════════════════════════════════════════
@@ -384,9 +478,12 @@ class LessonTaskHandler:
                         "section_index": idx,
                     }, room)
 
+                    memory_ctx = self.memory_service.get_accumulated_context(lesson_id)
+                    enriched_context = f"{context}\n\n{memory_ctx}" if memory_ctx else context
+
                     opinions = await self._stage1_analysis_stream(
                         session, lesson, stage_label, stage_num, room,
-                        context, full_draft[:3000],
+                        enriched_context, full_draft[:3000],
                         agents=local_agents, theories_framework=theories_framework,
                     )
 
@@ -433,6 +530,24 @@ class LessonTaskHandler:
                         "section_index": idx,
                         "content_preview": final_content[:300],
                     }, room)
+
+                    try:
+                        conv_text = "\n".join(
+                            f"{o['agent_role']}: {o['opinion'][:200]}" for o in opinions
+                        )
+                        summary = await self.memory_service.summarize_round(conv_text)
+                        accumulated = self.memory_service.get_accumulated_context(lesson_id)
+                        self.memory_service.save_round_memory(
+                            lesson_id=lesson_id,
+                            stage=stage_num,
+                            round_num=1,
+                            agents=[{"role": o["agent_role"], "opinion": o["opinion"][:500]} for o in opinions],
+                            vote_result={"accepted": best["agent_role"], "pass_rate": best.get("pass_rate", 0)},
+                            summary=summary,
+                            accumulated_context=accumulated,
+                        )
+                    except Exception as mem_err:
+                        logger.warning(f"[{lesson_id}] Memory save failed: {mem_err}")
 
                 # Generate full optimized document
                 logger.info(f"[{lesson_id}] Generating full optimized document...")
@@ -550,6 +665,195 @@ class LessonTaskHandler:
                     "error": str(e),
                 }, f"lesson_{lesson_id}")
 
+    async def continue_after_model_recommendation(self, lesson_id: str):
+        """Resume processing after teacher confirms model recommendation (semi-auto)."""
+        logger.info(f"[{lesson_id}] Semi-auto: continuing after model recommendation...")
+        async with async_session_maker() as session:
+            try:
+                lesson = await self._get_lesson(session, lesson_id)
+                if not lesson:
+                    return
+                lesson.status = LessonStatus.PROCESSING.value
+                await session.commit()
+
+                room = f"lesson_{lesson_id}"
+                context = _build_context(lesson)
+                fc = lesson.final_content or {}
+                model_rec = fc.get("model_recommendation", {})
+                active_models = model_rec.get("selected_models", [])
+                theories_framework = _build_theories_framework(active_models)
+                model_names_str = "、".join(m["name"] for m in active_models)
+
+                full_draft = await self._generate_full_draft_stream(
+                    lesson, room, context, session,
+                    active_models=active_models,
+                    theories_framework=theories_framework,
+                    model_names_str=model_names_str,
+                )
+
+                discussion_stages = _build_discussion_stages_for(active_models)
+                all_final_stages = {}
+                for ds in discussion_stages:
+                    all_final_stages[ds["key"]] = {
+                        "model_key": ds["model_key"], "model_name": ds["model_name"],
+                        "stage_name": ds["stage_name"], "draft": "", "content": "", "expert": "",
+                    }
+
+                lesson.final_content = {
+                    **fc, "title": lesson.title, "subject": lesson.subject,
+                    "grade_level": lesson.grade_level, "topic": lesson.topic,
+                    "student_type": lesson.student_type,
+                    "teaching_models": [m["name"] for m in active_models],
+                    "full_draft": full_draft, "stages": all_final_stages,
+                }
+                lesson.progress = 40
+                await session.commit()
+
+                if lesson.mode == "semi_auto":
+                    lesson.status = LessonStatus.AWAITING_CONFIRMATION.value
+                    lesson.current_phase = "draft_done"
+                    await session.commit()
+                    await _emit("progress_update", {
+                        "lesson_id": lesson_id, "status": "awaiting_confirmation",
+                        "progress": 40, "stage": "awaiting_confirmation",
+                        "phase": "draft_done", "message": "初步教案已生成，等待教师确认",
+                    }, room)
+                    return
+
+                await self._run_discussion_and_optimize(lesson_id, session, lesson, room, context,
+                    active_models, theories_framework, model_names_str, full_draft, all_final_stages, discussion_stages)
+            except Exception as e:
+                logger.error(f"Continue after model rec failed {lesson_id}: {e}", exc_info=True)
+
+    async def continue_after_draft(self, lesson_id: str):
+        """Resume after teacher confirms initial draft (semi-auto)."""
+        logger.info(f"[{lesson_id}] Semi-auto: continuing after draft...")
+        async with async_session_maker() as session:
+            try:
+                lesson = await self._get_lesson(session, lesson_id)
+                if not lesson:
+                    return
+                lesson.status = LessonStatus.PROCESSING.value
+                await session.commit()
+
+                room = f"lesson_{lesson_id}"
+                context = _build_context(lesson)
+                fc = lesson.final_content or {}
+                model_rec = fc.get("model_recommendation", {})
+                active_models = model_rec.get("selected_models", [])
+                theories_framework = _build_theories_framework(active_models)
+                model_names_str = "、".join(m["name"] for m in active_models)
+                full_draft = fc.get("full_draft", "")
+                all_final_stages = fc.get("stages", {})
+                discussion_stages = _build_discussion_stages_for(active_models)
+
+                await self._run_discussion_and_optimize(lesson_id, session, lesson, room, context,
+                    active_models, theories_framework, model_names_str, full_draft, all_final_stages, discussion_stages)
+            except Exception as e:
+                logger.error(f"Continue after draft failed {lesson_id}: {e}", exc_info=True)
+
+    async def continue_after_stage(self, lesson_id: str):
+        """Alias for continue_after_draft - resumes from wherever discussion left off."""
+        await self.continue_after_draft(lesson_id)
+
+    async def _run_discussion_and_optimize(
+        self, lesson_id, session, lesson, room, context,
+        active_models, theories_framework, model_names_str, full_draft, all_final_stages, discussion_stages,
+    ):
+        """Shared logic: run discussion for all stages, then optimize."""
+        total_discussion = len(discussion_stages)
+        model_rec = (lesson.final_content or {}).get("model_recommendation", {})
+        overall_reason = model_rec.get("overall_reason", "")
+        theories_suffix = f"熟练掌握{model_names_str}，{overall_reason}" if overall_reason else f"熟练掌握{model_names_str}"
+        local_agents = [
+            {**agent, "theories": theories_suffix}
+            for agent in AGENT_ROLES
+        ]
+
+        for ds in discussion_stages:
+            stage_num = ds["global_idx"] + 1
+            stage_label = f"{ds['model_name']} - {ds['stage_name']}"
+            stage_key = ds["key"]
+            idx = ds["global_idx"]
+
+            existing = all_final_stages.get(stage_key, {})
+            if existing.get("content"):
+                continue
+
+            lesson.current_stage = stage_num
+            lesson.progress = 45 + int((idx / total_discussion) * 50)
+            await session.commit()
+
+            await _emit("progress_update", {
+                "lesson_id": lesson_id, "progress": lesson.progress,
+                "stage": "section_start", "section": stage_label,
+                "section_key": stage_key, "section_index": idx,
+            }, room)
+
+            memory_ctx = self.memory_service.get_accumulated_context(lesson_id)
+            enriched_context = f"{context}\n\n{memory_ctx}" if memory_ctx else context
+
+            opinions = await self._stage1_analysis_stream(
+                session, lesson, stage_label, stage_num, room,
+                enriched_context, full_draft[:3000],
+                agents=local_agents, theories_framework=theories_framework,
+            )
+            expert_votes = await self._stage2_expert_votes(
+                session, lesson, stage_label, stage_num, opinions, room,
+                agents=local_agents,
+            )
+            best = await self._stage2_vote(
+                session, lesson, stage_label, stage_num, opinions, room, expert_votes,
+            )
+            await _emit("discussion_update", {
+                "lesson_id": lesson_id, "stage": stage_num, "type": "vote_complete",
+                "accepted_role": best["agent_role"], "pass_rate": best.get("pass_rate", 0.6),
+                "agree": best.get("agree", 3), "disagree": best.get("disagree", 2),
+            }, room)
+
+            final_content = await self._stage3_finalize_stream(
+                lesson, stage_label, stage_num, full_draft[:2000],
+                best["opinion"], room, context,
+                theories_framework=theories_framework, model_names_str=model_names_str,
+            )
+            all_final_stages[stage_key]["content"] = final_content
+            all_final_stages[stage_key]["expert"] = best["agent_role"]
+            lesson.final_content = {**lesson.final_content, "stages": all_final_stages}
+            await session.commit()
+
+            await _emit("progress_update", {
+                "lesson_id": lesson_id, "progress": 45 + int((stage_num / total_discussion) * 50),
+                "stage": "section_done", "section": stage_label, "section_key": stage_key,
+                "section_index": idx, "content_preview": final_content[:300],
+            }, room)
+
+            try:
+                conv_text = "\n".join(f"{o['agent_role']}: {o['opinion'][:200]}" for o in opinions)
+                summary = await self.memory_service.summarize_round(conv_text)
+                accumulated = self.memory_service.get_accumulated_context(lesson_id)
+                self.memory_service.save_round_memory(
+                    lesson_id=lesson_id, stage=stage_num, round_num=1,
+                    agents=[{"role": o["agent_role"], "opinion": o["opinion"][:500]} for o in opinions],
+                    vote_result={"accepted": best["agent_role"], "pass_rate": best.get("pass_rate", 0)},
+                    summary=summary, accumulated_context=accumulated,
+                )
+            except Exception as mem_err:
+                logger.warning(f"[{lesson_id}] Memory save failed: {mem_err}")
+
+        full_optimized = await self._generate_full_optimized_stream(
+            lesson, room, context, all_final_stages, session,
+            active_models=active_models, theories_framework=theories_framework,
+            model_names_str=model_names_str,
+        )
+        lesson.final_content = {**lesson.final_content, "full_optimized": full_optimized}
+        lesson.status = LessonStatus.COMPLETED.value
+        lesson.completed_at = datetime.utcnow()
+        lesson.progress = 100
+        await session.commit()
+
+        await _emit("lesson_completed", {"lesson_id": lesson_id, "status": "completed"}, room)
+        logger.info(f"教案生成完成: {lesson_id}")
+
     async def _get_lesson(self, session: AsyncSession, lesson_id: str) -> Optional[LessonPlan]:
         result = await session.execute(select(LessonPlan).where(LessonPlan.id == lesson_id))
         return result.scalar_one_or_none()
@@ -567,6 +871,15 @@ class LessonTaskHandler:
         grade_info = lesson.specific_grade or lesson.grade_level
         student_info = f"\n学生类型：{lesson.student_type}" if lesson.student_type else ""
 
+        preferred_theory = getattr(lesson, 'teaching_model_id', None) or ""
+        if preferred_theory in ("all", ""):
+            preferred_theory = ""
+
+        if preferred_theory:
+            return await self._use_teacher_selected_model(
+                lesson, room, preferred_theory, grade_info, student_info,
+            )
+
         prompt = f"""你是资深教育专家和课程设计专家。请深度分析以下课程信息，从教育学理论角度独立推导最适合的教学模型。
 
 【课程信息】
@@ -581,24 +894,29 @@ class LessonTaskHandler:
 3. 该年龄段学生的认知发展规律
 4. 最有效的学习方式和教学组织形式
 
-基于以上分析，推荐2-4个最适合的教学模型（可以是任何教育学领域的模型，
+基于以上分析，推荐1个最适合的教学模型（可以是任何教育学领域的模型，
 如5E模型、BOPPPS、PBL、单元整体教学、深度学习模型、翻转课堂、情境教学、
 任务型教学法、支架式教学、合作学习等，也可以是你认为更合适的其他模型）。
+只推荐最匹配的1个，并详细说明为什么这个模型最适合此课题。
+
+【重要】stages字段必须列出该教学模型的所有完整阶段，不能遗漏！
+例如：5E模型必须有5个阶段(Engage,Explore,Explain,Elaborate,Evaluate)；
+BOPPPS必须有6个阶段；PBL至少有5个阶段。请按照该模型的标准定义列出全部阶段。
 
 【输出格式】（严格按此JSON格式输出，不要输出其他内容）：
 {{
-  "overall_reason": "对该科目和课题的整体分析，说明为什么选择这些模型组合（100-150字）",
+  "overall_reason": "对该科目和课题的深度分析，说明为什么选择这个模型（150-250字，包含学科特点、知识性质、学生认知规律等分析）",
   "selected_models": [
     {{
       "key": "model_key_lowercase_english",
       "name": "教学模型名称",
-      "reason": "为什么该模型适合这个科目/课题的具体理由（60-100字）",
-      "stages": ["阶段1名称", "阶段2名称", "阶段3名称"]
+      "reason": "为什么该模型最适合这个科目/课题的详细理由（100-200字）",
+      "stages": ["该模型的第1阶段名称", "第2阶段名称", "...", "最后阶段名称（列出全部，不得省略）"]
     }}
   ]
 }}"""
 
-        sys_msg = "你是资深教育专家和课程设计专家。请根据学科和课题特点，从教育学理论角度推荐最适合的教学模型。严格按JSON格式输出。"
+        sys_msg = "你是资深教育专家和课程设计专家。请根据学科和课题特点，从教育学理论角度分析并推荐1个最适合的教学模型。严格按JSON格式输出，selected_models数组只包含1个模型。"
 
         full_text = ""
         chunk_count = 0
@@ -633,6 +951,61 @@ class LessonTaskHandler:
         logger.info(f"[{lesson.id}] Phase 0 done: recommended {[m['name'] for m in result['selected_models']]}")
         return result
 
+    async def _use_teacher_selected_model(
+        self, lesson: LessonPlan, room: str,
+        preferred_theory: str, grade_info: str, student_info: str,
+    ) -> dict:
+        """Teacher already chose a theory in semi-auto mode — use it directly,
+        only ask AI to explain how it applies to this specific lesson."""
+        model_key = re.sub(r'[^a-z0-9_]', '_', preferred_theory.lower())[:20]
+        stages = _get_known_model_stages(model_key, preferred_theory)
+
+        prompt = f"""你是资深教育专家。教师已经为本节课选定了教学理论/模型：「{preferred_theory}」。
+请针对以下课程信息，说明该理论如何具体应用于本节课，以及它的优势所在。
+
+【课程信息】
+科目：{lesson.subject}
+课题/主题：{lesson.topic or lesson.title}
+年级：{grade_info}{student_info}
+
+请用150-250字简要阐述「{preferred_theory}」在本节课中的适用性和应用策略。
+不需要推荐其他模型，直接围绕「{preferred_theory}」展开分析。"""
+
+        sys_msg = f"你是资深教育专家。教师已选定「{preferred_theory}」，请围绕该理论分析其在本节课的适用性。直接输出分析文字，不要输出JSON。"
+
+        full_text = ""
+        try:
+            async for chunk in self.ai_service.generate_stream(
+                prompt, provider_name="qwen", system_message=sys_msg, max_tokens=800,
+            ):
+                full_text += chunk
+                await _emit("stream_chunk", {
+                    "lesson_id": lesson.id, "stage": 0,
+                    "agent_role": "教学模型分析", "chunk": chunk,
+                    "phase": "model_recommendation",
+                }, room)
+        except Exception as e:
+            logger.warning(f"Teacher-selected model reason generation failed: {e}")
+            full_text = f"教师选定「{preferred_theory}」作为本节课的教学理论。"
+
+        await _emit("stream_end", {
+            "lesson_id": lesson.id, "stage": 0,
+            "agent_role": "教学模型分析", "full_text": full_text,
+            "phase": "model_recommendation",
+        }, room)
+
+        result = {
+            "overall_reason": full_text.strip(),
+            "selected_models": [{
+                "key": model_key,
+                "name": preferred_theory,
+                "reason": full_text.strip(),
+                "stages": stages,
+            }],
+        }
+        logger.info(f"[{lesson.id}] Phase 0 done (teacher-selected): {preferred_theory}")
+        return result
+
     # ── Full draft generation (ONE integrated call) ──
 
     async def _generate_full_draft_stream(
@@ -656,7 +1029,7 @@ class LessonTaskHandler:
         if not theories_framework:
             theories_framework = _build_theories_framework(active_models) if active_models else ""
         if not model_names_str:
-            model_names_str = "、".join(m["name"] for m in active_models) if active_models else "多种教学模型"
+            model_names_str = active_models[0]["name"] if active_models else "BOPPPS教学模型"
 
         stages_desc = _build_stages_description_for(active_models) if active_models else ""
 
@@ -665,7 +1038,7 @@ class LessonTaskHandler:
             avoid_note = f"\n特别注意: 避免以下问题: {lesson.avoid_issues}"
 
         if is_macau:
-            prompt = f"""請根據以下主題和內容，生成一份完整的教案。本教案必須綜合融合{model_names_str}等教學模型，不是分開生成多份，而是融合成一份完整的教案。
+            prompt = f"""請根據以下主題和內容，生成一份完整的教案。本教案採用{model_names_str}，請嚴格按照該模型的教學階段組織教學流程。
 
 {context}{avoid_note}
 
@@ -742,24 +1115,24 @@ AI教師
   難點2：[內容] → 學生能力對應：[分析] → 突破策略：[策略]
 
 【教學研究】
-一、設計理念與目標 [至少150字，體現{model_names_str}融合理念]
+一、設計理念與目標 [至少150字，體現{model_names_str}的教學理念]
 二、學生的分析 [至少150字]
 三、課程架構 [至少100字]
 四、節次分配 [至少80字]
-五、教學方法與評量 [至少100字，體現多種教學模型的融合應用]
+五、教學方法與評量 [至少100字，體現{model_names_str}的教學方法]
 六、參考資源 [至少80字]
 
-【教學流程】（融合{model_names_str}，每個環節標註對應的理論要素）
+【教學流程】（嚴格按照{model_names_str}的階段組織，每個環節標註對應的階段名稱）
 
 請使用表格形式呈現教學流程，表格必須包含：目標代號、活動流程、時間、教學資源、評量五列。
-在每個教學環節中標註融合了哪些教學模型的要素。
+在每個教學環節中標註對應{model_names_str}的哪個階段。
 
-【評價方式】（體現認知/情意/技能三個維度的評價，融合教學模型的評價理念）
+【評價方式】（體現認知/情意/技能三個維度的評價，體現{model_names_str}的評價理念）
 
 適合{lesson.grade_level}學生，學科: {lesson.subject}。
 使用繁體中文。不使用Markdown標記。直接輸出純文本教案內容。"""
         else:
-            prompt = f"""请根据以下主题和内容，生成一份完整的教案。本教案必须综合融合{model_names_str}等教学模型，不是分开生成多份，而是融合成一份完整的教案。
+            prompt = f"""请根据以下主题和内容，生成一份完整的教案。本教案采用{model_names_str}，请严格按照该模型的教学阶段组织教学流程。
 
 {context}{avoid_note}
 
@@ -769,26 +1142,27 @@ AI教師
 
 请生成一份完整的教案，包含：
 
-1. 教学目标（3-4个具体目标，体现多种教学模型的融合）
+1. 教学目标（3-4个具体目标，体现{model_names_str}的教学理念）
 2. 教学重点和难点
 3. 教学准备
 4. 学生能力分析
 
-5. 教学过程（根据所选教学模型的各个阶段组织，每个环节标注融合了哪些模型要素）：
-   请参照上述教学理论框架中各模型的阶段进行组织，将不同模型的相似阶段融合在一起。
-   每个环节包含具体的教学步骤、时间分配、教学活动设计。
+5. 教学过程（严格按照{model_names_str}的各个阶段顺序组织）：
+   请参照上述教学理论框架中的阶段进行组织。
+   每个环节包含具体的教学步骤、时间分配、教学活动设计，并标注对应{model_names_str}的哪个阶段。
 
 6. 板书设计
 7. 作业布置
-8. 教学评价（体现多种教学模型的评价理念融合）
+8. 教学评价（体现{model_names_str}的评价理念）
 
 适合{lesson.grade_level}学生，学科: {lesson.subject}。
 确保教案结构完整，时间分配合理。
 不使用Markdown标记。直接输出纯文本教案内容。"""
 
-        sys_msg = f"你是资深教案编写专家，熟练掌握{model_names_str}等教学模型。请生成一份融合多种教学模型的完整标准教案文档，不要使用Markdown格式，直接输出纯文本。"
+        locale_hint = _locale_hint(lesson)
+        sys_msg = f"你是资深教案编写专家，精通{model_names_str}。请基于该教学模型生成一份完整标准教案文档，不要使用Markdown格式，直接输出纯文本。{locale_hint}"
         if is_macau:
-            sys_msg = f"你是資深教案編寫專家，熟練掌握{model_names_str}等教學模型，熟悉澳門地區教育政策和教青局基本學力要求。請用繁體中文生成融合多種教學模型的完整教案，不使用Markdown格式。"
+            sys_msg = f"你是資深教案編寫專家，精通{model_names_str}，熟悉澳門地區教育政策和教青局基本學力要求。請用繁體中文基於該教學模型生成完整教案，不使用Markdown格式。"
 
         full_text = ""
         chunk_count = 0
@@ -853,11 +1227,12 @@ AI教師
         if not theories_framework:
             theories_framework = _build_theories_framework(active_models) if active_models else ""
         if not model_names_str:
-            model_names_str = "、".join(m["name"] for m in active_models) if active_models else "多种教学模型"
+            model_names_str = active_models[0]["name"] if active_models else "BOPPPS教学模型"
 
         per_stage_content = ""
-        for model in active_models:
-            per_stage_content += f"\n【{model['name']}】\n"
+        if active_models:
+            model = active_models[0]
+            per_stage_content += f"\n【{model['name']}各阶段优化内容】\n"
             for local_idx, stage_name in enumerate(model["stages"]):
                 key = f"{model['key']}_{local_idx}"
                 stage_data = all_final_stages.get(key, {})
@@ -873,8 +1248,8 @@ AI教師
             avoid_note = f"\n特别注意: 避免以下问题: {lesson.avoid_issues}"
 
         if is_macau:
-            prompt = f"""你是教研組主持人，現在需要將初始教案和教研老師們的改進建議融合，生成一份優化後的新教案。
-本教案融合了{model_names_str}等教學模型。
+            prompt = f"""你是教研組主持人，現在需要將初始教案和教研老師們的改進建議整合，生成一份優化後的新教案。
+本教案採用{model_names_str}。
 
 {theories_framework}
 
@@ -883,49 +1258,50 @@ AI教師
 【初始教案】（必須完整保留結構並遵循澳門教案要求）：
 {full_draft[:4000]}
 
-【各環節教研專家優化後的內容】：
+【各階段教研專家優化後的內容】：
 {per_stage_content}
 
 {context}{avoid_note}
 
-【融合要求】：
+【優化要求】：
 1. 保留初始教案的完整結構和主要內容，格式必須與澳門地區標準教案格式完全一致
-2. 將各環節專家的優化意見逐條完整融入到對應章節
-3. 在各教學環節標註融合了哪些教學模型的要素
-4. 融合後內容比原教案更詳細（增長30-50%）
-5. 改進後的內容更科學、更符合教學理論的融合要求
+2. 將各階段專家的優化意見逐條完整融入到對應章節
+3. 在各教學環節標註對應{model_names_str}的哪個階段
+4. 優化後內容比原教案更詳細（增長30-50%）
+5. 改進後的內容更科學、更符合{model_names_str}的教學理論
 6. 必須包含澳門教案的所有必需結構（課題名稱、班級、教學目標三維劃分、學生能力分析、教學內容分析、教學流程表格等）
 7. 語言流暢自然，使用繁體中文
 8. 不使用Markdown標記，直接輸出純文本
 9. 教學流程必須使用表格形式（目標代號、活動流程、時間、教學資源、評量）
 
-現在開始生成優化教案（必須包含所有必需內容結構和教學模型融合標註）："""
-            sys_msg = f"你是教研組主持人，熟練掌握{model_names_str}等教學模型，熟悉澳門教育政策。請用繁體中文輸出，不使用Markdown格式。"
+現在開始生成優化教案（必須包含所有必需內容結構和{model_names_str}階段標註）："""
+            sys_msg = f"你是教研組主持人，精通{model_names_str}，熟悉澳門教育政策。請用繁體中文輸出，不使用Markdown格式。"
         else:
-            prompt = f"""你是教研组主持人，现在需要基于初始教案和各环节教研专家的优化意见，生成一份融合优化后的完整教案。
-本教案融合了{model_names_str}等教学模型。
+            prompt = f"""你是教研组主持人，现在需要基于初始教案和各阶段教研专家的优化意见，生成一份优化后的完整教案。
+本教案采用{model_names_str}。
 
 {theories_framework}
 
 【初始教案】：
 {full_draft[:4000]}
 
-【各环节教研专家优化后的内容】：
+【各阶段教研专家优化后的内容】：
 {per_stage_content}
 
 {context}{avoid_note}
 
 【优化要求】：
 1. 保留初始教案的完整结构和主要内容
-2. 将各环节专家的优化内容逐条深度融入对应章节
-3. 在各教学环节标注融合了哪些教学模型的要素
-4. 体现多种教学模型的有机融合（不是分开使用，而是每个环节都体现多种模型）
-5. 融合后的教案更详细、更科学、更可操作
+2. 将各阶段专家的优化内容逐条深度融入对应章节
+3. 在各教学环节标注对应{model_names_str}的哪个阶段
+4. 严格遵循{model_names_str}的教学框架组织内容
+5. 优化后的教案更详细、更科学、更可操作
 6. 语言流畅自然，不使用Markdown标记
 7. 输出完整的教案文档
 
-现在开始生成优化教案（包含教学模型融合标注）："""
-            sys_msg = f"你是教研讨论主持人，熟练掌握{model_names_str}等教学模型。请整合优化内容生成完整教案文档，不要使用Markdown格式。"
+现在开始生成优化教案（标注{model_names_str}阶段对应关系）："""
+            locale_hint_opt = _locale_hint(lesson)
+            sys_msg = f"你是教研讨论主持人，精通{model_names_str}。请整合优化内容生成完整教案文档，不要使用Markdown格式。{locale_hint_opt}"
 
         full_text = ""
         chunk_count = 0
@@ -978,13 +1354,12 @@ AI教師
 
         is_macau = _is_macau_or_hk(getattr(lesson, 'region', '') or '')
 
+        rec = (lesson.final_content or {}).get("model_recommendation", {})
+        _active_models = rec.get("selected_models", [])
         if not theories_framework:
-            rec = (lesson.final_content or {}).get("model_recommendation", {})
-            active_models = rec.get("selected_models", [])
-            theories_framework = _build_theories_framework(active_models) if active_models else ""
-            model_names_str = "、".join(m["name"] for m in active_models) if active_models else "多种教学模型"
+            theories_framework = _build_theories_framework(_active_models) if _active_models else ""
         if not model_names_str:
-            model_names_str = "多种教学模型"
+            model_names_str = _active_models[0]["name"] if _active_models else "BOPPPS教学模型"
 
         avoid_note = ""
         if lesson.avoid_issues:
@@ -1001,12 +1376,12 @@ AI教師
 
 要求:
 - 包含具体教学步骤、时间分配、教学活动
-- 标注该环节融合了哪些教学模型要素
+- 标注该环节对应{model_names_str}的哪个阶段
 - 适合{lesson.grade_level}学生，学科: {lesson.subject}{avoid_note}
 - {'使用繁体中文，遵循澳门教案要求' if is_macau else '语言精炼专业'}
 - 不使用任何Markdown标记，直接输出纯文本"""
 
-        sys_msg = f"你是资深教案编写专家，熟练掌握{model_names_str}等教学模型。请直接输出纯文本，不要使用Markdown格式。"
+        sys_msg = f"你是资深教案编写专家，熟练掌握{model_names_str}等教学模型。请直接输出纯文本，不要使用Markdown格式。{_locale_hint(lesson)}"
 
         full_text = ""
         try:
@@ -1115,7 +1490,7 @@ AI教師
 
 关键发现：[从{agent_specialty}角度，结合教学模型发现的问题或亮点，50-80字]
 
-主要建议：[具体可操作的改进建议，要体现教学模型的融合应用，60-100字]
+主要建议：[具体可操作的改进建议，要体现所选教学模型的应用，60-100字]
 
 专业评分：[1-10分及理由]
 
@@ -1331,6 +1706,12 @@ AI教師
             "lesson_id": lesson.id, "stage": stage_num,
         }, room)
 
+        if num_opinions == 0:
+            return {
+                "agent_role": "未知", "opinion": "", "pass_rate": 0,
+                "agree": 0, "disagree": 0,
+            }
+
         best_idx = max(range(num_opinions), key=lambda i: per_opinion_tally[i]["agree"])
 
         vote_summary_lines = []
@@ -1392,14 +1773,14 @@ AI教師
         if not model_names_str:
             rec = (lesson.final_content or {}).get("model_recommendation", {})
             active_models = rec.get("selected_models", [])
-            model_names_str = "、".join(m["name"] for m in active_models) if active_models else "多种教学模型"
+            model_names_str = active_models[0]["name"] if active_models else "BOPPPS教学模型"
 
         avoid_note = ""
         if lesson.avoid_issues:
             avoid_note = f"\n- 避免以下问题: {lesson.avoid_issues}"
 
         prompt = f"""基于初步教案草稿和被采纳的专家改进意见，生成"{stage_name}"环节的最终优化教案。
-该环节融合了{model_names_str}等教学模型。
+该环节对应{model_names_str}的教学阶段。
 
 --- 初步草稿 ---
 {draft[:1500]}
@@ -1412,14 +1793,14 @@ AI教師
 融合要求:
 1. 在草稿基础上将专家意见逐条深度融入教案正文
 2. 不能只追加，要自然融入
-3. 标注该环节融合了哪些教学模型要素
-4. 融合后内容比原草稿更详细（增长30-50%）
+3. 标注该环节对应{model_names_str}的哪个阶段
+4. 优化后内容比原草稿更详细（增长30-50%）
 5. 包含具体教学步骤
 6. 适合{lesson.grade_level}学生，学科: {lesson.subject}{avoid_note}
 7. {'使用繁体中文，遵循澳门教案格式要求，确保包含目标代号、时间、教学资源、评量等要素' if is_macau else '语言精炼专业'}
 8. 不使用任何Markdown标记，直接输出纯文本"""
 
-        sys_msg = f"你是资深教案编写专家，熟练掌握{model_names_str}等教学模型。请直接输出纯文本，不要使用Markdown格式。"
+        sys_msg = f"你是资深教案编写专家，熟练掌握{model_names_str}等教学模型。请直接输出纯文本，不要使用Markdown格式。{_locale_hint(lesson)}"
 
         full_text = ""
         try:
@@ -1550,8 +1931,11 @@ AI教師
                         "section_key": stage_key, "section_index": idx,
                     }, room)
 
+                    memory_ctx = self.memory_service.get_accumulated_context(lesson_id)
+                    enriched_context = f"{context}\n\n{memory_ctx}" if memory_ctx else context
+
                     opinions = await self._stage1_analysis_stream(
-                        session, lesson, stage_label, stage_num, room, context, full_draft[:3000],
+                        session, lesson, stage_label, stage_num, room, enriched_context, full_draft[:3000],
                         agents=local_agents, theories_framework=theories_framework,
                     )
                     expert_votes = await self._stage2_expert_votes(
@@ -1568,7 +1952,7 @@ AI教師
                     }, room)
 
                     final_content = await self._stage3_finalize_stream(
-                        lesson, stage_label, stage_num, full_draft[:2000], best["opinion"], room, context,
+                        lesson, stage_label, stage_num, full_draft[:2000], best["opinion"], room, enriched_context,
                         theories_framework=theories_framework,
                         model_names_str=model_names_str,
                     )
@@ -1576,6 +1960,19 @@ AI教師
                     all_final_stages[stage_key]["expert"] = best["agent_role"]
                     lesson.final_content = {**lesson.final_content, "stages": all_final_stages}
                     await session.commit()
+
+                    try:
+                        conv_text = "\n".join(f"{o['agent_role']}: {o['opinion'][:200]}" for o in opinions)
+                        summary = await self.memory_service.summarize_round(conv_text)
+                        accumulated = self.memory_service.get_accumulated_context(lesson_id)
+                        self.memory_service.save_round_memory(
+                            lesson_id=lesson_id, stage=stage_num, round_num=1,
+                            agents=[{"role": o["agent_role"], "opinion": o["opinion"][:500]} for o in opinions],
+                            vote_result={"accepted": best["agent_role"], "pass_rate": best.get("pass_rate", 0)},
+                            summary=summary, accumulated_context=accumulated,
+                        )
+                    except Exception as mem_err:
+                        logger.warning(f"[{lesson_id}] Memory save failed in regenerate: {mem_err}")
 
                     await _emit("progress_update", {
                         "lesson_id": lesson_id,

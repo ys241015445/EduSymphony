@@ -3,10 +3,12 @@ import { useNavigate } from 'react-router-dom'
 import { useLessonStore } from '../stores/lessonStore'
 import { getSocket, joinLesson, leaveLesson } from '../services/socket'
 import { useAuthStore } from '../stores/authStore'
+import { useLanguageStore } from '../stores/languageStore'
+import { useT } from '../i18n/translations'
 import Header from '../components/layout/Header'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
-import { ArrowLeft, Zap, Loader2, CheckCircle2, Download, FileText, Eye } from 'lucide-react'
+import { ArrowLeft, Zap, Loader2, CheckCircle2, Eye } from 'lucide-react'
 
 const EXPORT_FORMATS = [
   { key: 'json', label: 'JSON', icon: '{ }' },
@@ -17,6 +19,7 @@ const EXPORT_FORMATS = [
 ]
 
 export default function QuickGenerate() {
+  const t = useT()
   const navigate = useNavigate()
   const { createLesson, fetchLesson, currentLesson } = useLessonStore()
 
@@ -37,7 +40,7 @@ export default function QuickGenerate() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!topic.trim()) {
-      setError('请输入教案主题')
+      setError(t('quick.topic_required'))
       return
     }
     setCreating(true)
@@ -50,10 +53,11 @@ export default function QuickGenerate() {
       form.append('source_type', 'manual')
       form.append('source_content', topic)
       form.append('mode', 'quick')
+      form.append('locale', useLanguageStore.getState().locale)
       const id = await createLesson(form)
       setLessonId(id)
     } catch (err: any) {
-      setError(err.response?.data?.detail || '创建失败，请重试')
+      setError(err.response?.data?.detail || t('quick.create_failed'))
       setCreating(false)
     }
   }
@@ -103,7 +107,7 @@ export default function QuickGenerate() {
     socket.on('progress_update', (data: any) => {
       if (data.lesson_id !== lessonId) return
       if (data.status === 'failed') {
-        setError(data.error || '生成失败')
+        setError(data.error || t('quick.gen_failed'))
         setStreaming(false)
         setCreating(false)
       }
@@ -117,7 +121,7 @@ export default function QuickGenerate() {
       socket.off('lesson_completed')
       socket.off('progress_update')
     }
-  }, [lessonId, fetchLesson])
+  }, [lessonId, fetchLesson, t])
 
   useEffect(() => {
     if (!currentLesson || currentLesson.id !== lessonId) return
@@ -147,7 +151,7 @@ export default function QuickGenerate() {
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }))
-        throw new Error(err.detail || '导出失败')
+        throw new Error(err.detail || t('quick.export_failed'))
       }
       const blob = await res.blob()
       const ext = format === 'markdown' ? 'md' : format
@@ -161,7 +165,7 @@ export default function QuickGenerate() {
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
     } catch (e: any) {
-      alert(e.message || '导出失败')
+      alert(e.message || t('quick.export_failed'))
     } finally {
       setExporting(null)
     }
@@ -176,7 +180,7 @@ export default function QuickGenerate() {
       <main className="max-w-4xl mx-auto px-6 py-8">
         <button onClick={() => navigate('/dashboard')} className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-700 mb-6">
           <ArrowLeft className="w-4 h-4" />
-          返回
+          {t('quick.back')}
         </button>
 
         {!hasStarted ? (
@@ -186,8 +190,8 @@ export default function QuickGenerate() {
               <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center mx-auto mb-4 shadow-lg">
                 <Zap className="w-7 h-7 text-white" />
               </div>
-              <h1 className="text-2xl font-bold text-gray-900">快速生成教案</h1>
-              <p className="text-sm text-gray-500 mt-2">输入主题，AI 直接生成初步教案，无需等待多轮讨论</p>
+              <h1 className="text-2xl font-bold text-gray-900">{t('quick.title')}</h1>
+              <p className="text-sm text-gray-500 mt-2">{t('quick.subtitle')}</p>
             </div>
 
             {error && (
@@ -197,12 +201,12 @@ export default function QuickGenerate() {
             <form onSubmit={handleSubmit}>
               <Card className="space-y-4">
                 <div className="space-y-1.5">
-                  <label className="block text-sm font-medium text-gray-700">教案主题 *</label>
+                  <label className="block text-sm font-medium text-gray-700">{t('quick.topic_label')}</label>
                   <input
                     type="text"
                     value={topic}
                     onChange={(e) => setTopic(e.target.value)}
-                    placeholder="例：光合作用的原理与过程"
+                    placeholder={t('quick.topic_ph')}
                     className="w-full px-4 py-3 rounded-lg border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 placeholder:text-gray-400"
                     autoFocus
                     required
@@ -210,22 +214,22 @@ export default function QuickGenerate() {
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1.5">
-                    <label className="block text-sm font-medium text-gray-700">学科</label>
+                    <label className="block text-sm font-medium text-gray-700">{t('quick.subject_label')}</label>
                     <input
                       type="text"
                       value={subject}
                       onChange={(e) => setSubject(e.target.value)}
-                      placeholder="例：生物"
+                      placeholder={t('quick.subject_ph')}
                       className={selectClasses}
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <label className="block text-sm font-medium text-gray-700">学段</label>
+                    <label className="block text-sm font-medium text-gray-700">{t('quick.grade_label')}</label>
                     <select value={gradeLevel} onChange={(e) => setGradeLevel(e.target.value)} className={selectClasses}>
-                      <option value="primary">小学</option>
-                      <option value="middle">初中</option>
-                      <option value="high">高中</option>
-                      <option value="college">大学</option>
+                      <option value="primary">{t('quick.grade_primary')}</option>
+                      <option value="middle">{t('quick.grade_middle')}</option>
+                      <option value="high">{t('quick.grade_high')}</option>
+                      <option value="college">{t('quick.grade_college')}</option>
                     </select>
                   </div>
                 </div>
@@ -236,12 +240,12 @@ export default function QuickGenerate() {
                   {creating ? (
                     <>
                       <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      正在创建...
+                      {t('quick.creating')}
                     </>
                   ) : (
                     <>
                       <Zap className="w-4 h-4 mr-2" />
-                      快速生成
+                      {t('quick.generate')}
                     </>
                   )}
                 </Button>
@@ -263,7 +267,7 @@ export default function QuickGenerate() {
                 <div>
                   <h1 className="text-lg font-bold text-gray-900">{topic}</h1>
                   <p className="text-xs text-gray-500">
-                    {isComplete ? '教案生成完成' : streaming ? '正在生成中...' : creating ? '正在初始化...' : '准备中...'}
+                    {isComplete ? t('quick.complete') : streaming ? t('quick.streaming') : creating ? t('quick.initializing') : t('quick.preparing')}
                   </p>
                 </div>
               </div>
@@ -308,7 +312,7 @@ export default function QuickGenerate() {
                 ) : (
                   <div className="flex flex-col items-center justify-center py-20 text-gray-400">
                     <Loader2 className="w-8 h-8 animate-spin mb-3 text-amber-400" />
-                    <span className="text-sm">AI 正在生成教案，请稍候...</span>
+                    <span className="text-sm">{t('quick.ai_generating')}</span>
                   </div>
                 )}
               </div>
@@ -318,11 +322,11 @@ export default function QuickGenerate() {
               <div className="flex justify-center gap-3 mt-6">
                 <Button variant="secondary" onClick={() => { setLessonId(null); setDraftText(''); setIsComplete(false); setTopic(''); setCreating(false) }}>
                   <Zap className="w-4 h-4 mr-1.5" />
-                  再生成一份
+                  {t('quick.generate_another')}
                 </Button>
                 <Button onClick={() => navigate(`/lesson/${lessonId}/process`)}>
                   <Eye className="w-4 h-4 mr-1.5" />
-                  查看完整流程
+                  {t('quick.view_full')}
                 </Button>
               </div>
             )}

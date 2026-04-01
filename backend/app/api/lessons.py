@@ -27,6 +27,7 @@ async def create_lesson(
     specific_grade: Optional[str] = Form(None),
     region: str = Form("mainland"),
     teaching_model_id: Optional[str] = Form(None),
+    preferred_theory: Optional[str] = Form(None),
     topic: Optional[str] = Form(None),
     avoid_issues: Optional[str] = Form(None),
     student_type: Optional[str] = Form(None),
@@ -34,6 +35,10 @@ async def create_lesson(
     source_content: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     mode: str = Form("full"),
+    generation_mode: str = Form("full_auto"),
+    locale: str = Form("zh-CN"),
+    parent_lesson_id: Optional[str] = Form(None),
+    teacher_feedback: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -58,7 +63,7 @@ async def create_lesson(
     elif source_type == "manual" and source_content:
         parsed_content = source_content
     else:
-        raise HTTPException(status_code=400, detail="必须提供文本内容或上传文件")
+        parsed_content = source_content or ""
 
     lesson = LessonPlan(
         id=str(uuid.uuid4()),
@@ -68,13 +73,17 @@ async def create_lesson(
         grade_level=grade_level,
         specific_grade=specific_grade,
         region=region,
-        teaching_model_id=teaching_model_id or "all",
+        teaching_model_id=preferred_theory or teaching_model_id or "all",
         topic=topic,
         avoid_issues=avoid_issues,
         student_type=student_type,
         source_type=source_type,
         source_content=source_content,
         parsed_content=parsed_content,
+        mode=generation_mode,
+        locale=locale,
+        parent_lesson_id=parent_lesson_id,
+        teacher_feedback=teacher_feedback,
         status=LessonStatus.QUEUED.value,
     )
     db.add(lesson)
@@ -387,3 +396,131 @@ async def regenerate_discussion(
         }, room)
 
     return {"status": "ok", "discussion_id": discussion_id, "opinion": new_text}
+
+
+@router.post("/{lesson_id}/confirm-step")
+async def confirm_step(
+    lesson_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Confirm current step in semi-auto mode to proceed to the next phase."""
+    result = await db.execute(
+        select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == current_user.id)
+    )
+    lesson = result.scalar_one_or_none()
+    if not lesson:
+        raise HTTPException(status_code=404, detail="教案不存在")
+    if lesson.status != LessonStatus.AWAITING_CONFIRMATION.value:
+        raise HTTPException(status_code=400, detail="当前不在等待确认状态")
+
+    lesson.status = LessonStatus.PROCESSING.value
+    await db.commit()
+
+    from app.tasks.lesson_task import LessonTaskHandler
+    from app.tasks.scheduler import get_scheduler
+    handler = LessonTaskHandler()
+    scheduler = get_scheduler()
+    current_phase = lesson.current_phase or ""
+
+    if current_phase == "model_recommendation_done":
+        task_fn = handler.continue_after_model_recommendation
+    elif current_phase == "draft_done":
+        task_fn = handler.continue_after_draft
+    elif current_phase.startswith("stage_"):
+        task_fn = handler.continue_after_stage
+    else:
+        task_fn = handler.continue_after_model_recommendation
+
+    if scheduler:
+        scheduler.add_job(
+            task_fn, "date",
+            args=[lesson_id], id=f"confirm_{lesson_id}", replace_existing=True,
+        )
+    else:
+        import asyncio
+        asyncio.create_task(task_fn(lesson_id))
+
+    return {"status": "ok", "message": "已确认，继续生成"}
+
+
+@router.post("/{lesson_id}/feedback")
+async def submit_feedback(
+    lesson_id: str,
+    feedback: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Submit teacher feedback for a completed lesson."""
+    result = await db.execute(
+        select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == current_user.id)
+    )
+    lesson = result.scalar_one_or_none()
+    if not lesson:
+        raise HTTPException(status_code=404, detail="教案不存在")
+
+    lesson.teacher_feedback = feedback
+    await db.commit()
+    return {"status": "ok", "message": "反馈已保存"}
+
+
+@router.post("/{lesson_id}/next-lesson", response_model=LessonResponse, status_code=201)
+async def generate_next_lesson(
+    lesson_id: str,
+    title: str = Form(...),
+    topic: Optional[str] = Form(None),
+    teacher_feedback: Optional[str] = Form(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Generate a follow-up lesson based on the previous one and teacher feedback."""
+    result = await db.execute(
+        select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == current_user.id)
+    )
+    parent = result.scalar_one_or_none()
+    if not parent:
+        raise HTTPException(status_code=404, detail="上一课教案不存在")
+
+    if teacher_feedback and not parent.teacher_feedback:
+        parent.teacher_feedback = teacher_feedback
+        await db.commit()
+
+    new_lesson = LessonPlan(
+        id=str(uuid.uuid4()),
+        user_id=current_user.id,
+        title=title,
+        subject=parent.subject,
+        grade_level=parent.grade_level,
+        specific_grade=parent.specific_grade,
+        region=parent.region,
+        teaching_model_id=parent.teaching_model_id,
+        topic=topic or "",
+        avoid_issues=parent.avoid_issues,
+        student_type=parent.student_type,
+        source_type="manual",
+        source_content=parent.parsed_content or parent.source_content,
+        parsed_content=parent.parsed_content or parent.source_content,
+        mode=parent.mode,
+        parent_lesson_id=lesson_id,
+        teacher_feedback=teacher_feedback or parent.teacher_feedback,
+        sequence_id=parent.sequence_id,
+        sequence_order=(parent.sequence_order or 0) + 1,
+        status=LessonStatus.QUEUED.value,
+    )
+    db.add(new_lesson)
+    if current_user.quota_remaining > 0:
+        current_user.quota_remaining -= 1
+    await db.commit()
+    await db.refresh(new_lesson)
+
+    from app.tasks.scheduler import get_scheduler
+    from app.tasks.lesson_task import LessonTaskHandler
+    handler = LessonTaskHandler()
+    scheduler = get_scheduler()
+    if scheduler:
+        scheduler.add_job(
+            handler.process_lesson, "date",
+            args=[new_lesson.id], id=f"lesson_{new_lesson.id}", replace_existing=True,
+        )
+
+    return LessonResponse.model_validate(new_lesson)

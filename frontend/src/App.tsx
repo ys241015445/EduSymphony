@@ -7,6 +7,8 @@ import LessonCreate from './pages/LessonCreate'
 import QuickGenerate from './pages/QuickGenerate'
 import LessonProcess from './pages/LessonProcess'
 import LessonResult from './pages/LessonResult'
+import SeriesCreate from './pages/SeriesCreate'
+import SeriesDashboard from './pages/SeriesDashboard'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const token = useAuthStore((s) => s.token)
@@ -56,6 +58,22 @@ export default function App() {
         element={
           <ProtectedRoute>
             <LessonResult />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/series/new"
+        element={
+          <ProtectedRoute>
+            <SeriesCreate />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/series/:id"
+        element={
+          <ProtectedRoute>
+            <SeriesDashboard />
           </ProtectedRoute>
         }
       />

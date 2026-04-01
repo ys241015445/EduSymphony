@@ -15,6 +15,10 @@ class LessonCreate(BaseModel):
     student_type: Optional[str] = None
     source_type: str
     source_content: Optional[str] = None
+    mode: str = "full_auto"
+    locale: str = "zh-CN"
+    parent_lesson_id: Optional[str] = None
+    teacher_feedback: Optional[str] = None
 
 
 class LessonResponse(BaseModel):
@@ -29,13 +33,20 @@ class LessonResponse(BaseModel):
     topic: Optional[str] = None
     avoid_issues: Optional[str] = None
     student_type: Optional[str] = None
+    mode: str = "full_auto"
+    locale: str = "zh-CN"
     status: str
     progress: int
     current_stage: int
+    current_phase: Optional[str] = None
     error_message: Optional[str] = None
     source_type: str
     parsed_content: Optional[str] = None
     final_content: Optional[Any] = None
+    parent_lesson_id: Optional[str] = None
+    teacher_feedback: Optional[str] = None
+    sequence_id: Optional[str] = None
+    sequence_order: Optional[int] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     created_at: Optional[datetime] = None

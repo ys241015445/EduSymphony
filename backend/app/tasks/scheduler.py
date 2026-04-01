@@ -1,4 +1,6 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.executors.asyncio import AsyncIOExecutor
+from apscheduler.executors.pool import ThreadPoolExecutor
 from loguru import logger
 
 _scheduler: AsyncIOScheduler = None
@@ -6,9 +8,13 @@ _scheduler: AsyncIOScheduler = None
 
 def init_scheduler():
     global _scheduler
-    _scheduler = AsyncIOScheduler()
+    executors = {
+        'default': AsyncIOExecutor(),
+        'threadpool': ThreadPoolExecutor(max_workers=5),
+    }
+    _scheduler = AsyncIOScheduler(executors=executors)
     _scheduler.start()
-    logger.info("任务调度器已启动")
+    logger.info("任务调度器已启动 (default=AsyncIO, threadpool=5 workers)")
 
 
 def shutdown_scheduler():

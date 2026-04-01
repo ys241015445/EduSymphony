@@ -554,6 +554,10 @@ async def _parse_template_file(file_path: str, ext: str) -> str:
         return await parser._parse_txt(file_path)
     elif ext == "pdf":
         return await parser._parse_pdf(file_path)
+    elif ext in ("docx", "doc"):
+        return await parser._parse_docx(file_path)
+    elif ext == "html":
+        return await parser._parse_txt(file_path)
     return await parser._parse_txt(file_path)
 
 
@@ -571,14 +575,48 @@ def _clean_ai_html(raw: str) -> str:
     return text.strip()
 
 
+_BUILTIN_DEFAULT_TEMPLATE = """【教案范本格式】
+课题名称：___
+班级：___    人数：___    教材来源：___    设计者：___    时间：___
+
+一、学生背景分析
+（描述学生已有知识基础、学习特点、认知水平）
+
+二、教学目标
+（一）认知目标  （二）情意目标  （三）技能目标
+
+三、具体目标
+1. ___  2. ___  3. ___
+
+四、学生能力分析
+（一）认知能力水平  （二）学习基础与能力  （三）学习困难与挑战
+
+五、教学内容分析
+（一）教学重点  （二）教学难点
+
+六、教学流程
+| 目标代号 | 活动流程 | 时间 | 教学资源 | 评量 |
+|---------|---------|------|---------|------|
+
+七、评价方式
+
+八、教学反思"""
+
+
 async def _get_default_template_text() -> str:
-    """Return cached default template text, parsing the PDF only once."""
+    """Return cached default template text, parsing the PDF only once. Falls back to built-in template."""
     global _cached_default_template
     if _cached_default_template is not None:
         return _cached_default_template
-    if not os.path.exists(DEFAULT_TEMPLATE_PATH):
-        raise HTTPException(status_code=500, detail="默认范本文件不存在，请检查服务端配置")
-    _cached_default_template = await _parse_template_file(DEFAULT_TEMPLATE_PATH, "pdf")
+    if os.path.exists(DEFAULT_TEMPLATE_PATH):
+        try:
+            _cached_default_template = await _parse_template_file(DEFAULT_TEMPLATE_PATH, "pdf")
+            return _cached_default_template
+        except Exception as e:
+            logger.warning(f"Failed to parse default template PDF: {e}, using built-in fallback")
+    else:
+        logger.warning(f"Default template not found at {DEFAULT_TEMPLATE_PATH}, using built-in fallback")
+    _cached_default_template = _BUILTIN_DEFAULT_TEMPLATE
     return _cached_default_template
 
 
@@ -605,8 +643,8 @@ async def generate_styled_pdf_html(
 
     if template_type == "upload" and template_file:
         ext = template_file.filename.rsplit(".", 1)[-1].lower() if "." in template_file.filename else "txt"
-        if ext not in ("txt", "md", "json", "pdf"):
-            raise HTTPException(status_code=400, detail="不支持的文件格式，请上传 txt、md、json 或 pdf 文件")
+        if ext not in ("txt", "md", "json", "pdf", "docx", "doc", "html"):
+            raise HTTPException(status_code=400, detail="不支持的文件格式，请上传 txt、md、json、pdf、docx、doc 或 html 文件")
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
             tmp_path = tmp.name
             tmp.write(await template_file.read())

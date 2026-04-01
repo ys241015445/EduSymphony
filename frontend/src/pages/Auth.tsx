@@ -1,11 +1,13 @@
 import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
+import { useT } from '../i18n/translations'
 import Button from '../components/ui/Button'
 import Input from '../components/ui/Input'
 import { BookOpen, ArrowLeft } from 'lucide-react'
 
 export default function Auth() {
+  const t = useT()
   const [mode, setMode] = useState<'login' | 'register'>('login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -27,7 +29,7 @@ export default function Auth() {
       }
       navigate('/dashboard')
     } catch (err: any) {
-      setError(err.response?.data?.detail || '操作失败，请稍后重试')
+      setError(err.response?.data?.detail || t('auth.error_default'))
     } finally {
       setLoading(false)
     }
@@ -40,15 +42,18 @@ export default function Auth() {
         <div>
           <Link to="/" className="flex items-center gap-2 text-white/90 hover:text-white transition-colors">
             <ArrowLeft className="w-4 h-4" />
-            <span className="text-sm">返回首页</span>
+            <span className="text-sm">{t('auth.back_home')}</span>
           </Link>
         </div>
         <div>
           <BookOpen className="w-12 h-12 mb-6 text-white/80" />
-          <h2 className="text-3xl font-bold mb-4">多智能体协作<br />教案生成平台</h2>
+          <h2 className="text-3xl font-bold mb-4">
+            {t('auth.hero_title_1')}
+            <br />
+            {t('auth.hero_title_2')}
+          </h2>
           <p className="text-white/70 leading-relaxed max-w-md">
-            5位AI教学专家为您的教案出谋划策——课程设计、学科知识、教学方法、评估反馈、技术整合，
-            全方位打磨每一个教学环节。
+            {t('auth.hero_desc')}
           </p>
         </div>
         <div className="text-white/40 text-sm">
@@ -62,15 +67,15 @@ export default function Auth() {
           <div className="lg:hidden mb-8">
             <Link to="/" className="flex items-center gap-2 text-gray-500 hover:text-gray-700 text-sm mb-6">
               <ArrowLeft className="w-4 h-4" />
-              返回首页
+              {t('auth.back_home')}
             </Link>
           </div>
 
           <h1 className="text-2xl font-bold text-gray-900 mb-2">
-            {mode === 'login' ? '欢迎回来' : '创建账号'}
+            {mode === 'login' ? t('auth.welcome_back') : t('auth.create_account')}
           </h1>
           <p className="text-gray-500 text-sm mb-8">
-            {mode === 'login' ? '登录以继续使用 EduSymphony' : '注册以开始使用 EduSymphony'}
+            {mode === 'login' ? t('auth.login_subtitle') : t('auth.register_subtitle')}
           </p>
 
           {error && (
@@ -82,47 +87,47 @@ export default function Auth() {
           <form onSubmit={handleSubmit} className="space-y-4">
             {mode === 'register' && (
               <Input
-                label="用户名"
-                placeholder="请输入用户名"
+                label={t('auth.username')}
+                placeholder={t('auth.username_placeholder')}
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 required
               />
             )}
             <Input
-              label="邮箱"
+              label={t('auth.email')}
               type="email"
-              placeholder="请输入邮箱地址"
+              placeholder={t('auth.email_placeholder')}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
             />
             <Input
-              label="密码"
+              label={t('auth.password')}
               type="password"
-              placeholder="请输入密码"
+              placeholder={t('auth.password_placeholder')}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
             />
             <Button type="submit" disabled={loading} className="w-full" size="lg">
-              {loading ? '处理中...' : mode === 'login' ? '登录' : '注册'}
+              {loading ? t('auth.processing') : mode === 'login' ? t('auth.login') : t('auth.register')}
             </Button>
           </form>
 
           <div className="mt-6 text-center text-sm text-gray-500">
             {mode === 'login' ? (
               <>
-                还没有账号？{' '}
-                <button onClick={() => setMode('register')} className="text-brand-600 hover:underline font-medium">
-                  立即注册
+                {t('auth.no_account')}{' '}
+                <button type="button" onClick={() => setMode('register')} className="text-brand-600 hover:underline font-medium">
+                  {t('auth.register_now')}
                 </button>
               </>
             ) : (
               <>
-                已有账号？{' '}
-                <button onClick={() => setMode('login')} className="text-brand-600 hover:underline font-medium">
-                  去登录
+                {t('auth.has_account')}{' '}
+                <button type="button" onClick={() => setMode('login')} className="text-brand-600 hover:underline font-medium">
+                  {t('auth.go_login')}
                 </button>
               </>
             )}

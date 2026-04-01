@@ -1,6 +1,8 @@
 import { BookOpen } from 'lucide-react'
+import { useT } from '../../i18n/translations'
 
 export default function Footer() {
+  const t = useT()
   return (
     <footer className="bg-gray-50 border-t border-gray-100">
       <div className="max-w-7xl mx-auto px-6 py-12">
@@ -11,30 +13,30 @@ export default function Footer() {
               <span className="font-semibold text-gray-900">EduSymphony</span>
             </div>
             <p className="text-sm text-gray-500 max-w-xs">
-              多智能体协作教案生成平台，让每一份教案都经过专业打磨。
+              {t('footer.desc')}
             </p>
           </div>
           <div className="grid grid-cols-2 gap-12 text-sm">
             <div>
-              <h4 className="font-medium text-gray-900 mb-3">产品</h4>
+              <h4 className="font-medium text-gray-900 mb-3">{t('footer.product')}</h4>
               <ul className="space-y-2 text-gray-500">
-                <li>教案生成</li>
-                <li>格式转换</li>
-                <li>多模型支持</li>
+                <li>{t('footer.product_gen')}</li>
+                <li>{t('footer.product_convert')}</li>
+                <li>{t('footer.product_models')}</li>
               </ul>
             </div>
             <div>
-              <h4 className="font-medium text-gray-900 mb-3">支持</h4>
+              <h4 className="font-medium text-gray-900 mb-3">{t('footer.support')}</h4>
               <ul className="space-y-2 text-gray-500">
-                <li>使用文档</li>
-                <li>常见问题</li>
-                <li>联系我们</li>
+                <li>{t('footer.support_docs')}</li>
+                <li>{t('footer.support_faq')}</li>
+                <li>{t('footer.support_contact')}</li>
               </ul>
             </div>
           </div>
         </div>
         <div className="mt-10 pt-6 border-t border-gray-200 text-center text-xs text-gray-400">
-          &copy; {new Date().getFullYear()} Powered by ZCST Education Research Group. All rights reserved.
+          {t('footer.copyright').replace('{year}', String(new Date().getFullYear()))}
         </div>
       </div>
     </footer>

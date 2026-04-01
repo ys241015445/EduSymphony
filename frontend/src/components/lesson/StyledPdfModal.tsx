@@ -1,5 +1,6 @@
 import { useState, useRef } from 'react'
 import { X, Upload, FileText, Loader2, AlertCircle } from 'lucide-react'
+import { useT } from '../../i18n/translations'
 import { useStyledPdfStore } from '../../stores/styledPdfStore'
 
 interface StyledPdfModalProps {
@@ -19,7 +20,9 @@ export default function StyledPdfModal({
   isGenerating = false,
   onClose,
 }: StyledPdfModalProps) {
+  const t = useT()
   const startGeneration = useStyledPdfStore((s) => s.startGeneration)
+  const clearError = useStyledPdfStore((s) => s.clearError)
 
   const [templateType, setTemplateType] = useState<'default' | 'upload'>('default')
   const [templateFile, setTemplateFile] = useState<File | null>(null)
@@ -32,19 +35,24 @@ export default function StyledPdfModal({
     const file = e.target.files?.[0]
     if (!file) return
     const ext = file.name.split('.').pop()?.toLowerCase() || ''
-    if (!['txt', 'md', 'json', 'pdf'].includes(ext)) {
-      setError('不支持的文件格式，请上传 txt、md、json 或 pdf 文件')
+    if (!['txt', 'md', 'json', 'pdf', 'docx', 'doc', 'html'].includes(ext)) {
+      setError(t('comp.template_unsupported'))
       return
     }
     setError('')
     setTemplateFile(file)
   }
 
-  const handleGenerate = () => {
+  const handleGenerate = async () => {
     if (templateType === 'upload' && !templateFile) return
     setError('')
-    startGeneration(lessonId, templateType, contentVersion, templateFile)
-    onClose()
+    clearError()
+    try {
+      await startGeneration(lessonId, templateType, contentVersion, templateFile)
+      onClose()
+    } catch {
+      setError(useStyledPdfStore.getState().error || t('comp.gen_failed'))
+    }
   }
 
   return (
@@ -58,8 +66,8 @@ export default function StyledPdfModal({
               <FileText className="w-5 h-5 text-indigo-600" />
             </div>
             <div>
-              <h2 className="text-base font-semibold text-gray-900">当地风格格式 PDF</h2>
-              <p className="text-xs text-gray-500">基于范本格式，由 AI 生成排版精美的教案</p>
+              <h2 className="text-base font-semibold text-gray-900">{t('comp.styled_pdf_title')}</h2>
+              <p className="text-xs text-gray-500">{t('comp.styled_pdf_desc')}</p>
             </div>
           </div>
           <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
@@ -71,7 +79,7 @@ export default function StyledPdfModal({
         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
           {/* Template selection */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">范本选择</label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">{t('comp.template_selection')}</label>
             <div className="flex gap-3">
               <button
                 onClick={() => { setTemplateType('default'); setTemplateFile(null) }}
@@ -88,8 +96,8 @@ export default function StyledPdfModal({
                   {templateType === 'default' && <div className="w-2 h-2 rounded-full bg-indigo-500" />}
                 </div>
                 <div className="text-left">
-                  <div className="text-sm font-medium text-gray-900">默认范本</div>
-                  <div className="text-xs text-gray-500">澳门教案格式（旋轉對稱圖形教案）</div>
+                  <div className="text-sm font-medium text-gray-900">{t('comp.template_default')}</div>
+                  <div className="text-xs text-gray-500">{t('comp.template_macau')}</div>
                 </div>
               </button>
               <button
@@ -107,8 +115,8 @@ export default function StyledPdfModal({
                   {templateType === 'upload' && <div className="w-2 h-2 rounded-full bg-indigo-500" />}
                 </div>
                 <div className="text-left">
-                  <div className="text-sm font-medium text-gray-900">上传范本</div>
-                  <div className="text-xs text-gray-500">自定义格式模板</div>
+                  <div className="text-sm font-medium text-gray-900">{t('comp.template_upload')}</div>
+                  <div className="text-xs text-gray-500">{t('comp.template_custom')}</div>
                 </div>
               </button>
             </div>
@@ -120,7 +128,7 @@ export default function StyledPdfModal({
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".txt,.md,.json,.pdf"
+                accept=".txt,.md,.json,.pdf,.docx,.doc,.html"
                 onChange={handleFileChange}
                 className="hidden"
               />
@@ -139,8 +147,8 @@ export default function StyledPdfModal({
                 ) : (
                   <div>
                     <Upload className="w-8 h-8 text-gray-400 mx-auto mb-2" />
-                    <p className="text-sm text-gray-600">点击上传范本文件</p>
-                    <p className="text-xs text-gray-400 mt-1">支持 TXT、MD、JSON、PDF 格式</p>
+                    <p className="text-sm text-gray-600">{t('comp.template_click_upload')}</p>
+                    <p className="text-xs text-gray-400 mt-1">{t('comp.template_formats')}</p>
                   </div>
                 )}
               </div>
@@ -149,7 +157,7 @@ export default function StyledPdfModal({
 
           {/* Version selection */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">教案版本</label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">{t('comp.content_version')}</label>
             <div className="flex gap-3">
               <button
                 onClick={() => setContentVersion('draft')}
@@ -166,8 +174,8 @@ export default function StyledPdfModal({
                   }`}>
                     {contentVersion === 'draft' && <div className="w-2 h-2 rounded-full bg-indigo-500" />}
                   </div>
-                  <span className="text-sm font-medium text-gray-900">初步教案</span>
-                  {!hasDraft && <span className="text-xs text-gray-400 ml-1">(未生成)</span>}
+                  <span className="text-sm font-medium text-gray-900">{t('comp.version_draft')}</span>
+                  {!hasDraft && <span className="text-xs text-gray-400 ml-1">{t('comp.not_generated')}</span>}
                 </div>
               </button>
               <button
@@ -185,8 +193,8 @@ export default function StyledPdfModal({
                   }`}>
                     {contentVersion === 'optimized' && <div className="w-2 h-2 rounded-full bg-indigo-500" />}
                   </div>
-                  <span className="text-sm font-medium text-gray-900">优化教案</span>
-                  {!hasOptimized && <span className="text-xs text-gray-400 ml-1">(未生成)</span>}
+                  <span className="text-sm font-medium text-gray-900">{t('comp.version_optimized')}</span>
+                  {!hasOptimized && <span className="text-xs text-gray-400 ml-1">{t('comp.not_generated')}</span>}
                 </div>
               </button>
             </div>
@@ -195,7 +203,7 @@ export default function StyledPdfModal({
           {/* Info hint */}
           <div className="flex items-start gap-2 p-3 rounded-lg bg-blue-50 border border-blue-200">
             <FileText className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
-            <p className="text-xs text-blue-700">点击生成后可关闭此窗口，AI 将在后台继续排版。完成后页面上方会出现提示，可随时查看和下载。</p>
+            <p className="text-xs text-blue-700">{t('comp.bg_hint')}</p>
           </div>
 
           {/* Error message */}
@@ -213,7 +221,7 @@ export default function StyledPdfModal({
             onClick={onClose}
             className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
           >
-            {isGenerating ? '后台继续生成' : '取消'}
+            {isGenerating ? t('comp.bg_continue') : t('comp.cancel')}
           </button>
           <button
             onClick={handleGenerate}
@@ -223,12 +231,12 @@ export default function StyledPdfModal({
             {isGenerating ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
-                生成中...
+                {t('comp.generating')}
               </>
             ) : (
               <>
                 <FileText className="w-4 h-4" />
-                开始生成
+                {t('comp.start_generate')}
               </>
             )}
           </button>

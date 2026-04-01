@@ -5,7 +5,7 @@ import socketio
 
 from app.core.config import settings
 from app.core.database import engine, Base
-from app.api import auth, teaching_models, lessons, export
+from app.api import auth, teaching_models, lessons, export, series
 
 
 @asynccontextmanager
@@ -46,6 +46,7 @@ app.include_router(auth.router, prefix="/api/v1")
 app.include_router(teaching_models.router, prefix="/api/v1")
 app.include_router(lessons.router, prefix="/api/v1")
 app.include_router(export.router, prefix="/api/v1")
+app.include_router(series.router, prefix="/api/v1")
 
 
 @app.get("/")

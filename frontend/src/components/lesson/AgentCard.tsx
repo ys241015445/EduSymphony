@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { User, ChevronDown, ChevronUp, RefreshCw, ThumbsUp, ThumbsDown } from 'lucide-react'
 import clsx from 'clsx'
+import { useT } from '../../i18n/translations'
 import StreamingText from './StreamingText'
 
 interface VoteDetail {
@@ -62,6 +63,7 @@ export default function AgentCard({
   isAccepted, votes, timestamp, compact, provider,
   selectable, selected, onToggleSelect, onRegenerate, isRegenerating,
 }: Props) {
+  const t = useT()
   const [expanded, setExpanded] = useState(false)
   const [showVoteDetails, setShowVoteDetails] = useState(false)
   const colorClass = roleColors[role] || 'bg-gray-50 text-gray-700 border-gray-200'
@@ -110,12 +112,12 @@ export default function AgentCard({
           )}
           {isStreaming && (
             <span className="text-xs bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded-full font-medium animate-pulse">
-              生成中
+              {t('comp.generating_label')}
             </span>
           )}
           {isAccepted && (
             <span className="text-xs bg-brand-100 text-brand-700 px-2 py-0.5 rounded-full font-medium">
-              已采纳
+              {t('comp.accepted')}
             </span>
           )}
         </div>
@@ -133,7 +135,7 @@ export default function AgentCard({
               )}
             >
               <RefreshCw className={clsx('w-3 h-3', isRegenerating && 'animate-spin')} />
-              重新生成该建议
+              {t('comp.regenerate')}
             </button>
           )}
         </div>
@@ -161,7 +163,7 @@ export default function AgentCard({
           className="mt-2 flex items-center gap-1 text-xs text-brand-600 hover:text-brand-700"
         >
           {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-          {expanded ? '收起' : '查看完整内容'}
+          {expanded ? t('comp.collapse') : t('comp.expand')}
         </button>
       )}
 
@@ -191,7 +193,7 @@ export default function AgentCard({
               className="flex items-center gap-1 text-xs text-gray-500 hover:text-brand-600 transition-colors"
             >
               {showVoteDetails ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-              投票详情 ({totalVotes}票)
+              {t('comp.vote_detail')} ({totalVotes}{t('comp.vote_unit')})
             </button>
           )}
 
@@ -215,7 +217,7 @@ export default function AgentCard({
                           ? 'bg-green-100 text-green-700'
                           : 'bg-red-100 text-red-600',
                       )}>
-                        {vd.vote === 'agree' ? '赞成' : '反对'}
+                        {vd.vote === 'agree' ? t('comp.vote_agree') : t('comp.vote_disagree')}
                       </span>
                     </div>
                     {vd.reason && (

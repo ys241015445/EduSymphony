@@ -1,4 +1,5 @@
 import { ThumbsUp, ThumbsDown } from 'lucide-react'
+import { useT } from '../../i18n/translations'
 
 interface Props {
   agree: number
@@ -8,13 +9,14 @@ interface Props {
 }
 
 export default function VoteResult({ agree, disagree, acceptedRole, passRate }: Props) {
+  const t = useT()
   const total = agree + disagree
   const pct = total > 0 ? Math.round((agree / total) * 100) : 0
 
   return (
     <div className="bg-gray-50 rounded-xl p-4 border border-gray-100">
       <div className="flex items-center justify-between mb-3">
-        <span className="text-xs font-medium text-gray-500 uppercase tracking-wider">投票结果</span>
+        <span className="text-xs font-medium text-gray-500 uppercase tracking-wider">{t('comp.vote_result')}</span>
         <span className="text-xs text-brand-600 font-medium">{acceptedRole}</span>
       </div>
 
@@ -33,7 +35,7 @@ export default function VoteResult({ agree, disagree, acceptedRole, passRate }: 
       </div>
 
       <div className="text-xs text-gray-400 text-center">
-        通过率 {Math.round(passRate * 100)}%
+        {t('comp.pass_rate')} {Math.round(passRate * 100)}%
       </div>
     </div>
   )

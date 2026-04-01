@@ -1,40 +1,11 @@
 import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
-import { BookOpen, Users, Zap, Shield, FileText, ArrowRight, CheckCircle2 } from 'lucide-react'
+import { Users, Zap, Shield, FileText, ArrowRight, CheckCircle2 } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
+import { useT } from '../i18n/translations'
 import Header from '../components/layout/Header'
 import Footer from '../components/layout/Footer'
 import Button from '../components/ui/Button'
-
-const features = [
-  {
-    icon: Users,
-    title: '多专家协作',
-    desc: '5位AI教学专家从不同维度分析教案，通过讨论投票产出最优方案。',
-  },
-  {
-    icon: Zap,
-    title: '多种教学模型',
-    desc: '支持5E、BOPPPS、PBL等主流教学模型，适配不同学科与年级。',
-  },
-  {
-    icon: Shield,
-    title: '数据本地存储',
-    desc: '所有教案数据存储在您的本地服务器，完全掌控隐私与安全。',
-  },
-  {
-    icon: FileText,
-    title: '多格式导出',
-    desc: '一键导出为Word、PDF、Markdown、TXT等格式，满足多场景需求。',
-  },
-]
-
-const steps = [
-  { num: '01', title: '上传或输入教案素材', desc: '支持文字输入、Word、PDF等多种格式上传。' },
-  { num: '02', title: '选择教学模型与参数', desc: '选择5E/BOPPPS/PBL模型，配置学科、年级、地区等信息。' },
-  { num: '03', title: 'AI多专家协作生成', desc: '5位专家独立分析 → 讨论投票 → 融合优化，全程可视化。' },
-  { num: '04', title: '审阅、批注、导出', desc: '查看生成结果，添加批注，选择重新生成，最终导出使用。' },
-]
 
 const fade = {
   hidden: { opacity: 0, y: 24 },
@@ -46,7 +17,45 @@ const fade = {
 }
 
 export default function Landing() {
+  const t = useT()
   const isLoggedIn = useAuthStore((s) => !!s.token)
+
+  const features = [
+    {
+      icon: Users,
+      title: t('landing.feat1_title'),
+      desc: t('landing.feat1_desc'),
+    },
+    {
+      icon: Zap,
+      title: t('landing.feat2_title'),
+      desc: t('landing.feat2_desc'),
+    },
+    {
+      icon: Shield,
+      title: t('landing.feat3_title'),
+      desc: t('landing.feat3_desc'),
+    },
+    {
+      icon: FileText,
+      title: t('landing.feat4_title'),
+      desc: t('landing.feat4_desc'),
+    },
+  ]
+
+  const steps = [
+    { num: '01', title: t('landing.step1_title'), desc: t('landing.step1_desc') },
+    { num: '02', title: t('landing.step2_title'), desc: t('landing.step2_desc') },
+    { num: '03', title: t('landing.step3_title'), desc: t('landing.step3_desc') },
+    { num: '04', title: t('landing.step4_title'), desc: t('landing.step4_desc') },
+  ]
+
+  const demoDiscussion = [
+    { role: t('landing.demo_role1'), msg: t('landing.demo_msg1') },
+    { role: t('landing.demo_role2'), msg: t('landing.demo_msg2') },
+    { role: t('landing.demo_role3'), msg: t('landing.demo_msg3') },
+  ]
+
   return (
     <div className="min-h-screen flex flex-col">
       <Header />
@@ -62,9 +71,9 @@ export default function Landing() {
               transition={{ duration: 0.6 }}
               className="text-4xl lg:text-5xl font-bold text-gray-900 leading-tight tracking-tight"
             >
-              让每一份教案
+              {t('landing.hero_line1')}
               <br />
-              <span className="text-brand-600">都经过专业打磨</span>
+              <span className="text-brand-600">{t('landing.hero_line2')}</span>
             </motion.h1>
             <motion.p
               initial={{ opacity: 0, y: 20 }}
@@ -72,8 +81,7 @@ export default function Landing() {
               transition={{ duration: 0.6, delay: 0.15 }}
               className="mt-6 text-lg text-gray-500 max-w-xl leading-relaxed"
             >
-              EduSymphony 通过多智能体协作，模拟真实教研团队的讨论与评审流程，
-              帮助教师高效产出结构化、高质量的教案。
+              {t('landing.hero_desc')}
             </motion.p>
             <motion.div
               initial={{ opacity: 0, y: 20 }}
@@ -83,18 +91,18 @@ export default function Landing() {
             >
               <Link to="/login">
                 <Button size="lg">
-                  免费开始使用
+                  {t('landing.cta_start')}
                   <ArrowRight className="ml-2 w-4 h-4" />
                 </Button>
               </Link>
               <a href="#features">
-                <Button variant="secondary" size="lg">了解更多</Button>
+                <Button variant="secondary" size="lg">{t('landing.cta_learn')}</Button>
               </a>
               {isLoggedIn && (
                 <Link to="/quick-generate">
                   <Button variant="secondary" size="lg" className="!border-amber-300 !text-amber-700 !bg-amber-50 hover:!bg-amber-100">
                     <Zap className="w-4 h-4 mr-1.5" />
-                    快速生成
+                    {t('landing.cta_quick')}
                   </Button>
                 </Link>
               )}
@@ -111,11 +119,11 @@ export default function Landing() {
               <div className="w-3 h-3 rounded-full bg-red-400" />
               <div className="w-3 h-3 rounded-full bg-yellow-400" />
               <div className="w-3 h-3 rounded-full bg-green-400" />
-              <span className="ml-3 text-xs text-gray-400">EduSymphony — 教案生成中</span>
+              <span className="ml-3 text-xs text-gray-400">{t('landing.demo_bar')}</span>
             </div>
             <div className="p-8 grid grid-cols-2 gap-6 min-h-[280px]">
               <div>
-                <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">教案内容</div>
+                <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">{t('landing.demo_content')}</div>
                 <div className="space-y-3">
                   {['引入 (Engage)', '探索 (Explore)', '解释 (Explain)', '拓展 (Extend)', '评价 (Evaluate)'].map((s, i) => (
                     <div key={s} className="flex items-center gap-2.5">
@@ -126,13 +134,9 @@ export default function Landing() {
                 </div>
               </div>
               <div>
-                <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">AI 讨论过程</div>
+                <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">{t('landing.demo_discussion')}</div>
                 <div className="space-y-2.5">
-                  {[
-                    { role: '课程设计专家', msg: '建议在引入环节加入情境问题…' },
-                    { role: '学科专家', msg: '内容需要与课标紧密关联…' },
-                    { role: '教学法专家', msg: '同意，但建议增加互动环节…' },
-                  ].map((d) => (
+                  {demoDiscussion.map((d) => (
                     <div key={d.role} className="bg-gray-50 rounded-lg p-3">
                       <div className="text-xs font-medium text-brand-700">{d.role}</div>
                       <div className="text-xs text-gray-500 mt-1">{d.msg}</div>
@@ -149,8 +153,8 @@ export default function Landing() {
       <section id="features" className="py-20 bg-white">
         <div className="max-w-7xl mx-auto px-6">
           <div className="text-center mb-14">
-            <h2 className="text-3xl font-bold text-gray-900">为什么选择 EduSymphony</h2>
-            <p className="mt-3 text-gray-500">AI驱动的多专家协作，让教案设计更专业、更高效</p>
+            <h2 className="text-3xl font-bold text-gray-900">{t('landing.feat_title')}</h2>
+            <p className="mt-3 text-gray-500">{t('landing.feat_subtitle')}</p>
           </div>
           <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-8">
             {features.map((f, i) => (
@@ -178,8 +182,8 @@ export default function Landing() {
       <section className="py-20 bg-gray-50">
         <div className="max-w-7xl mx-auto px-6">
           <div className="text-center mb-14">
-            <h2 className="text-3xl font-bold text-gray-900">如何使用</h2>
-            <p className="mt-3 text-gray-500">简单四步，生成专业教案</p>
+            <h2 className="text-3xl font-bold text-gray-900">{t('landing.how_title')}</h2>
+            <p className="mt-3 text-gray-500">{t('landing.how_subtitle')}</p>
           </div>
           <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-8">
             {steps.map((s, i) => (
@@ -203,11 +207,11 @@ export default function Landing() {
       {/* CTA */}
       <section className="py-20 bg-white">
         <div className="max-w-3xl mx-auto px-6 text-center">
-          <h2 className="text-3xl font-bold text-gray-900 mb-4">准备好提升你的教案质量了吗？</h2>
-          <p className="text-gray-500 mb-8">注册即可免费体验，无需绑定支付方式。</p>
+          <h2 className="text-3xl font-bold text-gray-900 mb-4">{t('landing.cta_title')}</h2>
+          <p className="text-gray-500 mb-8">{t('landing.cta_subtitle')}</p>
           <Link to="/login">
             <Button size="lg">
-              立即开始
+              {t('landing.cta_button')}
               <ArrowRight className="ml-2 w-4 h-4" />
             </Button>
           </Link>

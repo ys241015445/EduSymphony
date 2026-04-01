@@ -6,12 +6,15 @@ import Header from '../components/layout/Header'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
 import { ArrowLeft, FileJson, FileText, Eye, BookOpen, Sparkles } from 'lucide-react'
+import TeachingFeedback from '../components/lesson/TeachingFeedback'
+import { useT } from '../i18n/translations'
 
 type ViewMode = 'optimized' | 'draft' | 'stages'
 
 export default function LessonResult() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const t = useT()
   const { currentLesson, fetchLesson } = useLessonStore()
   const [activeStage, setActiveStage] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>('optimized')
@@ -42,7 +45,7 @@ export default function LessonResult() {
     return (
       <div className="min-h-screen bg-gray-50">
         <Header />
-        <div className="max-w-7xl mx-auto px-6 py-20 text-center text-gray-500">加载中...</div>
+        <div className="max-w-7xl mx-auto px-6 py-20 text-center text-gray-500">{t('result.loading')}</div>
       </div>
     )
   }
@@ -68,11 +71,15 @@ export default function LessonResult() {
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
     } catch (err: any) {
-      const msg = err?.response?.status === 400
-        ? '教案尚未生成完成，无法导出'
-        : err?.response?.status === 404
-          ? '教案不存在'
-          : `导出失败: ${err?.message || '未知错误'}`
+      const detail = err?.message?.trim?.() || ''
+      const msg =
+        err?.response?.status === 400
+          ? t('result.export_not_ready')
+          : err?.response?.status === 404
+            ? t('result.export_not_found')
+            : detail
+              ? `${t('result.export_failed')}: ${detail}`
+              : t('result.export_failed')
       alert(msg)
     }
   }
@@ -86,7 +93,7 @@ export default function LessonResult() {
           <div className="flex items-center gap-4">
             <button onClick={() => navigate('/dashboard')} className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-700">
               <ArrowLeft className="w-4 h-4" />
-              返回
+              {t('result.back')}
             </button>
             <div>
               <h1 className="text-xl font-bold text-gray-900">{currentLesson.title}</h1>
@@ -108,7 +115,7 @@ export default function LessonResult() {
             <Link to={`/lesson/${id}/process`}>
               <Button variant="ghost" size="sm">
                 <Eye className="w-4 h-4 mr-1.5" />
-                查看过程
+                {t('result.view_process')}
               </Button>
             </Link>
           </div>
@@ -126,7 +133,7 @@ export default function LessonResult() {
               }`}
             >
               <Sparkles className="w-4 h-4" />
-              优化教案
+              {t('result.tab_optimized')}
             </button>
           )}
           {fullDraft && (
@@ -139,7 +146,7 @@ export default function LessonResult() {
               }`}
             >
               <BookOpen className="w-4 h-4" />
-              初步教案
+              {t('result.tab_draft')}
             </button>
           )}
           <button
@@ -151,14 +158,14 @@ export default function LessonResult() {
             }`}
           >
             <FileText className="w-4 h-4" />
-            各环节详情
+            {t('result.tab_stages')}
           </button>
         </div>
 
         {/* Document view */}
         {viewMode === 'optimized' && fullOptimized && (
           <Card>
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">优化教案</h2>
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">{t('result.optimized_title')}</h2>
             <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">
               {fullOptimized}
             </div>
@@ -167,7 +174,7 @@ export default function LessonResult() {
 
         {viewMode === 'draft' && fullDraft && (
           <Card>
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">初步教案</h2>
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">{t('result.draft_title')}</h2>
             <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">
               {fullDraft}
             </div>
@@ -179,7 +186,7 @@ export default function LessonResult() {
           <div className="grid lg:grid-cols-[240px_1fr] gap-6">
             <Card padding={false} className="h-fit sticky top-24">
               <div className="p-4">
-                <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">教案章节</h3>
+                <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">{t('result.chapters')}</h3>
                 <nav className="space-y-1">
                   {Object.entries(stages).map(([key, stage]: [string, any]) => (
                     <button
@@ -210,14 +217,23 @@ export default function LessonResult() {
                     )}
                   </div>
                   <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">
-                    {stages[activeStage].content || stages[activeStage].draft || '暂无内容'}
+                    {stages[activeStage].content || stages[activeStage].draft || t('result.no_content')}
                   </div>
                 </div>
               ) : (
-                <p className="text-gray-400 text-center py-10">请选择一个章节查看内容</p>
+                <p className="text-gray-400 text-center py-10">{t('result.select_chapter')}</p>
               )}
             </Card>
           </div>
+        )}
+
+        {currentLesson && currentLesson.status === 'completed' && (
+          <Card className="mt-6">
+            <TeachingFeedback
+              lessonId={currentLesson.id}
+              lessonTitle={currentLesson.title}
+            />
+          </Card>
         )}
       </main>
     </div>

@@ -27,6 +27,14 @@ async def get_db():
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        try:
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "ALTER TABLE lesson_plans ADD COLUMN locale VARCHAR(10) DEFAULT 'zh-CN'"
+                )
+            )
+        except Exception:
+            pass
 
 
 async def close_db():
