@@ -1,57 +1,58 @@
-"""
-应用配置
-"""
 from pydantic_settings import BaseSettings
 from typing import List
 import os
 
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "database")
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(os.path.join(DATA_DIR, "files"), exist_ok=True)
+
+
 class Settings(BaseSettings):
-    """应用配置"""
-    
-    # 应用基础配置
     APP_ENV: str = "development"
     APP_DEBUG: bool = True
-    
-    # 数据库配置
-    DATABASE_URL: str = "mysql+aiomysql://edusymphony:password@localhost:3306/edusymphony"
-    
-    # Redis配置
-    REDIS_URL: str = "redis://localhost:6379/0"
-    
-    # JWT配置
-    JWT_SECRET: str = "your-secret-key-change-in-production"
+
+    DATABASE_URL: str = f"sqlite+aiosqlite:///{os.path.join(DATA_DIR, 'edusymphony.db')}"
+
+    JWT_SECRET: str = "change-me-in-production-edusymphony-2026"
     JWT_ALGORITHM: str = "HS256"
-    JWT_EXPIRE_MINUTES: int = 1440  # 24小时
-    
-    # CORS配置
-    CORS_ORIGINS: List[str] = ["http://localhost", "http://localhost:3000"]
-    
-    # AI模型配置
+    JWT_EXPIRE_MINUTES: int = 1440
+
+    CORS_ORIGINS: List[str] = ["*"]
+
+    QWEN_API_KEY: str = ""
+    QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    QWEN_MODEL: str = "qwen-plus"
+
+    KIMI_API_KEY: str = ""
+    KIMI_BASE_URL: str = "https://api.moonshot.cn/v1"
+    KIMI_MODEL: str = "kimi-k2-0905-preview"
+
+    DOUBAO_API_KEY: str = ""
+    DOUBAO_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"
+    DOUBAO_MODEL: str = "doubao-seed-1-6-251015"
+
+    DEEPSEEK_API_KEY: str = ""
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+
+    SPARK_API_KEY: str = ""
+    SPARK_BASE_URL: str = "https://spark-api-open.xf-yun.com/v1"
+    SPARK_MODEL: str = "generalv3.5"
+
     OPENAI_API_KEY: str = ""
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
-    
-    QWEN_API_KEY: str = ""
-    QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/api/v1"
-    
-    # Chroma向量库配置
-    CHROMA_HOST: str = "localhost"
-    CHROMA_PORT: int = 8000
-    
-    # MinIO配置
-    MINIO_ENDPOINT: str = "localhost:9000"
-    MINIO_ACCESS_KEY: str = "minioadmin"
-    MINIO_SECRET_KEY: str = "minioadmin123"
-    MINIO_BUCKET: str = "edusymphony"
-    MINIO_SECURE: bool = False
-    
-    # 日志配置
+
+    DATA_DIR: str = DATA_DIR
+    FILES_DIR: str = os.path.join(DATA_DIR, "files")
+
     LOG_LEVEL: str = "INFO"
-    LOG_FILE: str = "/app/logs/app.log"
-    
+
+    # Optional absolute path to a TTF/TTC for PDF export (ReportLab / xhtml2pdf). Env: PDF_CJK_FONT_PATH
+    PDF_CJK_FONT_PATH: str = ""
+
     class Config:
         env_file = ".env"
         case_sensitive = True
 
-# 创建全局配置实例
-settings = Settings()
 
+settings = Settings()

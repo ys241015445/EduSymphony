@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.example
+database/
+*.db
+.git/
+.gitignore
+*.md
+*.bat

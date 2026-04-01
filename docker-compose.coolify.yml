@@ -1,0 +1,26 @@
+version: "3.8"
+
+# EduSymphony - Coolify 部署
+# 单容器 (前端+后端+Nginx)，无外部数据库依赖
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    env_file:
+      - .env
+    volumes:
+      - app_data:/app/backend/database
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+volumes:
+  app_data:

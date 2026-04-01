@@ -1,0 +1,36 @@
+.git
+.gitignore
+
+# Node
+**/node_modules
+**/dist
+**/.next
+
+# Python
+**/__pycache__
+**/*.pyc
+**/.venv
+**/venv
+
+# IDE
+.idea
+.vscode
+.cursor
+*.swp
+
+# 数据
+backend/database/
+*.db
+
+# 环境文件（compose 通过 env_file 注入）
+.env
+.env.*
+!.env.example
+
+# 其他
+*.md
+*.bat
+*.log
+.DS_Store
+frontend.7z
+backend/templates/
