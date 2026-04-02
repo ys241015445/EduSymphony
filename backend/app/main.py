@@ -40,6 +40,7 @@ app.add_middleware(
 )
 
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
+# 必须作为 Uvicorn 入口挂载此应用，否则 /socket.io 无法工作（勿仅用 app）
 socket_app = socketio.ASGIApp(sio, app)
 
 app.include_router(auth.router, prefix="/api/v1")
@@ -135,4 +136,5 @@ async def _seed_teaching_models():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:application", host="0.0.0.0", port=8001, reload=True)
+    # 与 frontend/vite 代理默认端口一致；生产/Docker 另见 Dockerfile
+    uvicorn.run("app.main:socket_app", host="0.0.0.0", port=3002, reload=True)

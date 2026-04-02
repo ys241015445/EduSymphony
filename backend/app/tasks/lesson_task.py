@@ -69,77 +69,177 @@ def _build_discussion_stages_for(active_models: List[Dict]) -> List[Dict]:
     return stages
 
 
-def _build_theories_framework(active_models: List[Dict]) -> str:
+def _build_theories_framework(active_models: List[Dict], locale: str = "zh-CN") -> str:
     """Build teaching theory framework description from the single recommended model."""
     if not active_models:
         return ""
     model = active_models[0]
-    lines = [
-        f"【教学理论框架】",
-        f"本教案采用「{model['name']}」教学模型。",
-    ]
-    if model.get("reason"):
-        lines.append(f"选用理由：{model['reason']}")
-    lines.append("教学阶段：")
-    for j, stage in enumerate(model["stages"], 1):
-        lines.append(f"  {j}. {stage}")
-    lines.append(f"\n请严格按照「{model['name']}」的上述阶段顺序组织教学流程。")
+    if locale == "en":
+        lines = [
+            "[Teaching Theory Framework]",
+            f'This lesson plan uses the "{model["name"]}" teaching model.',
+        ]
+        if model.get("reason"):
+            lines.append(f"Selection rationale: {model['reason']}")
+        lines.append("Teaching Stages:")
+        for j, stage in enumerate(model["stages"], 1):
+            lines.append(f"  {j}. {stage}")
+        lines.append(f'\nPlease strictly organize the teaching process according to the stages of "{model["name"]}" listed above.')
+    elif locale == "zh-TW":
+        lines = [
+            "【教學理論框架】",
+            f"本教案採用「{model['name']}」教學模型。",
+        ]
+        if model.get("reason"):
+            lines.append(f"選用理由：{model['reason']}")
+        lines.append("教學階段：")
+        for j, stage in enumerate(model["stages"], 1):
+            lines.append(f"  {j}. {stage}")
+        lines.append(f"\n請嚴格按照「{model['name']}」的上述階段順序組織教學流程。")
+    else:
+        lines = [
+            "【教学理论框架】",
+            f"本教案采用「{model['name']}」教学模型。",
+        ]
+        if model.get("reason"):
+            lines.append(f"选用理由：{model['reason']}")
+        lines.append("教学阶段：")
+        for j, stage in enumerate(model["stages"], 1):
+            lines.append(f"  {j}. {stage}")
+        lines.append(f"\n请严格按照「{model['name']}」的上述阶段顺序组织教学流程。")
     return "\n".join(lines)
 
 
-def _build_stages_description_for(active_models: List[Dict]) -> str:
+def _build_stages_description_for(active_models: List[Dict], locale: str = "zh-CN") -> str:
     """Build stages description block from the single selected model."""
     if not active_models:
         return ""
     model = active_models[0]
-    lines = [f"【教学环节（{model['name']}）】"]
+    if locale == "en":
+        lines = [f"[Teaching Stages ({model['name']})]"]
+    elif locale == "zh-TW":
+        lines = [f"【教學環節（{model['name']}）】"]
+    else:
+        lines = [f"【教学环节（{model['name']}）】"]
     for s in model["stages"]:
         lines.append(f"  - {s}")
     return "\n".join(lines)
 
 
-KNOWN_MODEL_STAGES: Dict[str, List[str]] = {
-    "5e": ["参与(Engage)", "探索(Explore)", "解释(Explain)", "精致化(Elaborate)", "评价(Evaluate)"],
-    "boppps": ["导入(Bridge-in)", "目标(Objective)", "前测(Pre-assessment)",
-               "参与式学习(Participatory)", "后测(Post-assessment)", "总结(Summary)"],
-    "pbl": ["问题情境", "任务设计", "自主/合作探究", "成果展示", "反思评价"],
-    "addie": ["分析(Analysis)", "设计(Design)", "开发(Development)", "实施(Implementation)", "评估(Evaluation)"],
-    "flipped": ["课前自主学习", "课中内化吸收", "课中协作探究", "课后巩固拓展"],
-    "situational": ["创设情境", "确定问题", "自主学习", "协作学习", "效果评价"],
-    "task_based": ["任务前(Pre-task)", "任务中(Task cycle)", "任务后(Post-task)"],
-    "scaffolding": ["搭建脚手架", "进入情境", "独立探索", "协作学习", "效果评价"],
-    "cooperative": ["组建小组", "明确任务", "合作探究", "展示交流", "评价反思"],
-    "deep_learning": ["深度导入", "深度体验", "深度探究", "深度建构", "深度评价"],
-    "unit_design": ["单元目标设定", "学情分析", "内容整合", "活动设计", "多元评价"],
+KNOWN_MODEL_STAGES: Dict[str, Dict[str, List[str]]] = {
+    "5e": {
+        "zh-CN": ["参与(Engage)", "探索(Explore)", "解释(Explain)", "精致化(Elaborate)", "评价(Evaluate)"],
+        "zh-TW": ["參與(Engage)", "探索(Explore)", "解釋(Explain)", "精緻化(Elaborate)", "評價(Evaluate)"],
+        "en":    ["Engage", "Explore", "Explain", "Elaborate", "Evaluate"],
+    },
+    "boppps": {
+        "zh-CN": ["导入(Bridge-in)", "目标(Objective)", "前测(Pre-assessment)",
+                   "参与式学习(Participatory)", "后测(Post-assessment)", "总结(Summary)"],
+        "zh-TW": ["導入(Bridge-in)", "目標(Objective)", "前測(Pre-assessment)",
+                   "參與式學習(Participatory)", "後測(Post-assessment)", "總結(Summary)"],
+        "en":    ["Bridge-in", "Objective", "Pre-assessment", "Participatory Learning", "Post-assessment", "Summary"],
+    },
+    "pbl": {
+        "zh-CN": ["问题情境", "任务设计", "自主/合作探究", "成果展示", "反思评价"],
+        "zh-TW": ["問題情境", "任務設計", "自主/合作探究", "成果展示", "反思評價"],
+        "en":    ["Problem Context", "Task Design", "Inquiry & Collaboration", "Presentation", "Reflection & Assessment"],
+    },
+    "addie": {
+        "zh-CN": ["分析(Analysis)", "设计(Design)", "开发(Development)", "实施(Implementation)", "评估(Evaluation)"],
+        "zh-TW": ["分析(Analysis)", "設計(Design)", "開發(Development)", "實施(Implementation)", "評估(Evaluation)"],
+        "en":    ["Analysis", "Design", "Development", "Implementation", "Evaluation"],
+    },
+    "flipped": {
+        "zh-CN": ["课前自主学习", "课中内化吸收", "课中协作探究", "课后巩固拓展"],
+        "zh-TW": ["課前自主學習", "課中內化吸收", "課中協作探究", "課後鞏固拓展"],
+        "en":    ["Pre-class Self-study", "In-class Internalization", "In-class Collaborative Inquiry", "Post-class Consolidation"],
+    },
+    "situational": {
+        "zh-CN": ["创设情境", "确定问题", "自主学习", "协作学习", "效果评价"],
+        "zh-TW": ["創設情境", "確定問題", "自主學習", "協作學習", "效果評價"],
+        "en":    ["Create Scenario", "Define Problem", "Self-directed Learning", "Collaborative Learning", "Outcome Assessment"],
+    },
+    "task_based": {
+        "zh-CN": ["任务前(Pre-task)", "任务中(Task cycle)", "任务后(Post-task)"],
+        "zh-TW": ["任務前(Pre-task)", "任務中(Task cycle)", "任務後(Post-task)"],
+        "en":    ["Pre-task", "Task Cycle", "Post-task"],
+    },
+    "scaffolding": {
+        "zh-CN": ["搭建脚手架", "进入情境", "独立探索", "协作学习", "效果评价"],
+        "zh-TW": ["搭建鷹架", "進入情境", "獨立探索", "協作學習", "效果評價"],
+        "en":    ["Build Scaffold", "Enter Context", "Independent Exploration", "Collaborative Learning", "Assessment"],
+    },
+    "cooperative": {
+        "zh-CN": ["组建小组", "明确任务", "合作探究", "展示交流", "评价反思"],
+        "zh-TW": ["組建小組", "明確任務", "合作探究", "展示交流", "評價反思"],
+        "en":    ["Form Groups", "Clarify Tasks", "Cooperative Inquiry", "Presentation & Sharing", "Assessment & Reflection"],
+    },
+    "deep_learning": {
+        "zh-CN": ["深度导入", "深度体验", "深度探究", "深度建构", "深度评价"],
+        "zh-TW": ["深度導入", "深度體驗", "深度探究", "深度建構", "深度評價"],
+        "en":    ["Deep Introduction", "Deep Experience", "Deep Inquiry", "Deep Construction", "Deep Assessment"],
+    },
+    "unit_design": {
+        "zh-CN": ["单元目标设定", "学情分析", "内容整合", "活动设计", "多元评价"],
+        "zh-TW": ["單元目標設定", "學情分析", "內容整合", "活動設計", "多元評價"],
+        "en":    ["Unit Objective Setting", "Learner Analysis", "Content Integration", "Activity Design", "Multiple Assessment"],
+    },
+}
+
+_DEFAULT_STAGES: Dict[str, List[str]] = {
+    "zh-CN": ["导入", "新授", "实践", "巩固", "总结"],
+    "zh-TW": ["導入", "新授", "實踐", "鞏固", "總結"],
+    "en":    ["Introduction", "New Instruction", "Practice", "Consolidation", "Summary"],
 }
 
 
-def _get_known_model_stages(key: str, name: str) -> List[str]:
+def _get_known_model_stages(key: str, name: str, locale: str = "zh-CN") -> List[str]:
     """Return known stages for common teaching models based on key or name."""
+    loc = locale if locale in ("zh-CN", "zh-TW", "en") else "zh-CN"
     key_lower = key.lower()
     name_lower = name.lower() if name else ""
-    for model_key, stages in KNOWN_MODEL_STAGES.items():
+    for model_key, loc_dict in KNOWN_MODEL_STAGES.items():
         if model_key in key_lower or model_key in name_lower:
-            return list(stages)
+            return list(loc_dict.get(loc, loc_dict["zh-CN"]))
     if "5e" in name_lower:
-        return list(KNOWN_MODEL_STAGES["5e"])
+        return list(KNOWN_MODEL_STAGES["5e"].get(loc, KNOWN_MODEL_STAGES["5e"]["zh-CN"]))
     if "boppps" in name_lower:
-        return list(KNOWN_MODEL_STAGES["boppps"])
-    if "pbl" in name_lower or "项目" in name_lower:
-        return list(KNOWN_MODEL_STAGES["pbl"])
+        return list(KNOWN_MODEL_STAGES["boppps"].get(loc, KNOWN_MODEL_STAGES["boppps"]["zh-CN"]))
+    if "pbl" in name_lower or "项目" in name_lower or "project" in name_lower:
+        return list(KNOWN_MODEL_STAGES["pbl"].get(loc, KNOWN_MODEL_STAGES["pbl"]["zh-CN"]))
     if "翻转" in name_lower or "flip" in name_lower:
-        return list(KNOWN_MODEL_STAGES["flipped"])
-    if "情境" in name_lower:
-        return list(KNOWN_MODEL_STAGES["situational"])
-    if "支架" in name_lower:
-        return list(KNOWN_MODEL_STAGES["scaffolding"])
+        return list(KNOWN_MODEL_STAGES["flipped"].get(loc, KNOWN_MODEL_STAGES["flipped"]["zh-CN"]))
+    if "情境" in name_lower or "situational" in name_lower or "scenario" in name_lower:
+        return list(KNOWN_MODEL_STAGES["situational"].get(loc, KNOWN_MODEL_STAGES["situational"]["zh-CN"]))
+    if "支架" in name_lower or "scaffold" in name_lower:
+        return list(KNOWN_MODEL_STAGES["scaffolding"].get(loc, KNOWN_MODEL_STAGES["scaffolding"]["zh-CN"]))
     if "合作" in name_lower or "cooperative" in name_lower:
-        return list(KNOWN_MODEL_STAGES["cooperative"])
-    return ["导入", "新授", "实践", "巩固", "总结"]
+        return list(KNOWN_MODEL_STAGES["cooperative"].get(loc, KNOWN_MODEL_STAGES["cooperative"]["zh-CN"]))
+    return list(_DEFAULT_STAGES.get(loc, _DEFAULT_STAGES["zh-CN"]))
 
 
-def _parse_model_recommendation(raw_text: str) -> dict:
+_FALLBACK_RECOMMENDATION: Dict[str, Dict] = {
+    "zh-CN": {
+        "overall_reason": "基于学科特点和学生认知发展规律，推荐BOPPPS教学模型，其结构化的六步教学流程适合系统性知识传授。",
+        "name": "BOPPPS教学模型",
+        "reason": "BOPPPS模型的六步结构化教学流程（导入-目标-前测-参与式学习-后测-总结）适合系统性知识传授，能确保教学目标明确、评价完整。",
+    },
+    "zh-TW": {
+        "overall_reason": "基於學科特點和學生認知發展規律，推薦BOPPPS教學模型，其結構化的六步教學流程適合系統性知識傳授。",
+        "name": "BOPPPS教學模型",
+        "reason": "BOPPPS模型的六步結構化教學流程（導入-目標-前測-參與式學習-後測-總結）適合系統性知識傳授，能確保教學目標明確、評價完整。",
+    },
+    "en": {
+        "overall_reason": "Based on subject characteristics and student cognitive development, the BOPPPS teaching model is recommended. Its structured six-step process is well-suited for systematic knowledge instruction.",
+        "name": "BOPPPS Teaching Model",
+        "reason": "The BOPPPS model's six-step structured teaching process (Bridge-in, Objective, Pre-assessment, Participatory Learning, Post-assessment, Summary) is ideal for systematic instruction, ensuring clear objectives and comprehensive assessment.",
+    },
+}
+
+
+def _parse_model_recommendation(raw_text: str, locale: str = "zh-CN") -> dict:
     """Extract model recommendation JSON from Qwen's output with robust fallback."""
+    loc = locale if locale in ("zh-CN", "zh-TW", "en") else "zh-CN"
     json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', raw_text, re.DOTALL)
     if json_match:
         json_str = json_match.group(1).strip()
@@ -162,9 +262,9 @@ def _parse_model_recommendation(raw_text: str) -> dict:
                 if "key" not in m:
                     m["key"] = re.sub(r'[^a-z0-9_]', '_', m.get("name", "model").lower())[:20]
                 if "stages" not in m or not isinstance(m["stages"], list) or len(m["stages"]) == 0:
-                    m["stages"] = _get_known_model_stages(m.get("key", ""), m.get("name", ""))
+                    m["stages"] = _get_known_model_stages(m.get("key", ""), m.get("name", ""), loc)
                 else:
-                    known = _get_known_model_stages(m.get("key", ""), m.get("name", ""))
+                    known = _get_known_model_stages(m.get("key", ""), m.get("name", ""), loc)
                     if len(m["stages"]) < len(known):
                         logger.warning(f"AI returned {len(m['stages'])} stages for {m.get('name')}, expected {len(known)}, using known stages")
                         m["stages"] = known
@@ -178,21 +278,27 @@ def _parse_model_recommendation(raw_text: str) -> dict:
                 raise ValueError("empty selected_models")
             if not data.get("overall_reason"):
                 m0 = data["selected_models"][0]
-                data["overall_reason"] = f"基于学科特点和学生认知发展规律，推荐采用{m0['name']}。"
+                fb = _FALLBACK_RECOMMENDATION[loc]
+                if loc == "en":
+                    data["overall_reason"] = f"Based on subject characteristics and student cognitive patterns, {m0['name']} is recommended."
+                elif loc == "zh-TW":
+                    data["overall_reason"] = f"基於學科特點和學生認知發展規律，推薦採用{m0['name']}。"
+                else:
+                    data["overall_reason"] = f"基于学科特点和学生认知发展规律，推荐采用{m0['name']}。"
             return data
     except (json.JSONDecodeError, ValueError, TypeError, KeyError, AttributeError):
         pass
 
     logger.warning("Failed to parse model recommendation JSON, using fallback")
+    fb = _FALLBACK_RECOMMENDATION[loc]
     return {
-        "overall_reason": "基于学科特点和学生认知发展规律，推荐BOPPPS教学模型，其结构化的六步教学流程适合系统性知识传授。",
+        "overall_reason": fb["overall_reason"],
         "selected_models": [
             {
                 "key": "boppps",
-                "name": "BOPPPS教学模型",
-                "reason": "BOPPPS模型的六步结构化教学流程（导入-目标-前测-参与式学习-后测-总结）适合系统性知识传授，能确保教学目标明确、评价完整。",
-                "stages": ["导入(Bridge-in)", "目标(Objective)", "前测(Pre-assessment)",
-                           "参与式学习(Participatory)", "后测(Post-assessment)", "总结(Summary)"],
+                "name": fb["name"],
+                "reason": fb["reason"],
+                "stages": list(KNOWN_MODEL_STAGES["boppps"].get(loc, KNOWN_MODEL_STAGES["boppps"]["zh-CN"])),
             },
         ],
     }
@@ -294,6 +400,66 @@ def _locale_hint(lesson: LessonPlan) -> str:
     if avoid and _LANG_OVERRIDE_RE.search(avoid):
         return ""
     return LOCALE_INSTRUCTION.get(getattr(lesson, "locale", None) or "zh-CN", "")
+
+
+def _progress_msg(key: str, locale: str, **kwargs) -> str:
+    """Return a locale-aware progress message for socket events."""
+    _MSGS: Dict[str, Dict[str, str]] = {
+        "analyzing_model": {
+            "zh-CN": "AI正在深度分析最适合的教学模型...",
+            "zh-TW": "AI正在深度分析最適合的教學模型...",
+            "en": "AI is analyzing the most suitable teaching model...",
+        },
+        "model_done_awaiting": {
+            "zh-CN": "模型分析完成，等待教师确认",
+            "zh-TW": "模型分析完成，等待教師確認",
+            "en": "Model analysis complete, awaiting teacher confirmation",
+        },
+        "generating_draft": {
+            "zh-CN": "正在生成初步教案（融合{model}）...",
+            "zh-TW": "正在生成初步教案（融合{model}）...",
+            "en": "Generating initial lesson plan ({model})...",
+        },
+        "draft_done_awaiting": {
+            "zh-CN": "初步教案已生成，等待教师确认",
+            "zh-TW": "初步教案已生成，等待教師確認",
+            "en": "Initial lesson plan generated, awaiting teacher confirmation",
+        },
+        "draft_done_discussing": {
+            "zh-CN": "初步教案已完成，开始按理论环节教研讨论...",
+            "zh-TW": "初步教案已完成，開始按理論環節教研討論...",
+            "en": "Initial draft complete, starting expert discussion by teaching stages...",
+        },
+        "quick_generating": {
+            "zh-CN": "正在快速生成教案（{model}）...",
+            "zh-TW": "正在快速生成教案（{model}）...",
+            "en": "Quickly generating lesson plan ({model})...",
+        },
+        "regen_draft": {
+            "zh-CN": "正在重新生成初步教案（{model}）...",
+            "zh-TW": "正在重新生成初步教案（{model}）...",
+            "en": "Regenerating initial lesson plan ({model})...",
+        },
+        "regen_draft_done_discussing": {
+            "zh-CN": "初步教案已重新生成，开始按理论环节教研讨论...",
+            "zh-TW": "初步教案已重新生成，開始按理論環節教研討論...",
+            "en": "Initial draft regenerated, starting expert discussion by teaching stages...",
+        },
+        "re_optimizing": {
+            "zh-CN": "正在二次优化教案...",
+            "zh-TW": "正在二次優化教案...",
+            "en": "Performing secondary optimization...",
+        },
+        "regen_analyzing_model": {
+            "zh-CN": "AI正在重新分析最适合的教学模型...",
+            "zh-TW": "AI正在重新分析最適合的教學模型...",
+            "en": "AI is re-analyzing the most suitable teaching model...",
+        },
+    }
+    loc = locale if locale in ("zh-CN", "zh-TW", "en") else "zh-CN"
+    tpl = _MSGS.get(key, {}).get(loc, _MSGS.get(key, {}).get("zh-CN", key))
+    return tpl.format(**kwargs) if kwargs else tpl
+
 
 def _prompt_locale(lesson) -> dict:
     """Return locale-aware prompt fragments for expert analysis / voting."""
@@ -532,9 +698,10 @@ class LessonTaskHandler:
                 # PHASE 0: Qwen deep analysis → recommend teaching models
                 # ════════════════════════════════════════
                 logger.info(f"[{lesson_id}] PHASE 0: Qwen deep analysis for model recommendation...")
+                lesson_locale = getattr(lesson, "locale", None) or "zh-CN"
                 await _emit("progress_update", {
                     "lesson_id": lesson_id, "progress": 2,
-                    "stage": "model_recommendation", "message": "AI正在深度分析最适合的教学模型...",
+                    "stage": "model_recommendation", "message": _progress_msg("analyzing_model", lesson_locale),
                 }, room)
 
                 model_rec = await self._recommend_teaching_models(lesson, room, context, session)
@@ -552,19 +719,31 @@ class LessonTaskHandler:
                         "lesson_id": lesson_id, "status": "awaiting_confirmation",
                         "progress": 10, "stage": "awaiting_confirmation",
                         "phase": "model_recommendation_done",
-                        "message": "模型分析完成，等待教师确认",
+                        "message": _progress_msg("model_done_awaiting", lesson_locale),
                     }, room)
                     return
 
                 discussion_stages = _build_discussion_stages_for(active_models)
                 total_discussion = len(discussion_stages)
-                theories_framework = _build_theories_framework(active_models)
-                model_names_str = "、".join(m["name"] for m in active_models)
+                lesson_locale = getattr(lesson, "locale", None) or "zh-CN"
+                theories_framework = _build_theories_framework(active_models, lesson_locale)
+                model_names_str = ", ".join(m["name"] for m in active_models) if lesson_locale == "en" else "、".join(m["name"] for m in active_models)
 
-                local_agents = [
-                    {**agent, "theories": f"熟练掌握{model_names_str}，{model_rec['overall_reason']}"}
-                    for agent in AGENT_ROLES
-                ]
+                if lesson_locale == "en":
+                    local_agents = [
+                        {**agent, "theories": f"Proficient in {model_names_str}. {model_rec['overall_reason']}"}
+                        for agent in AGENT_ROLES
+                    ]
+                elif lesson_locale == "zh-TW":
+                    local_agents = [
+                        {**agent, "theories": f"熟練掌握{model_names_str}，{model_rec['overall_reason']}"}
+                        for agent in AGENT_ROLES
+                    ]
+                else:
+                    local_agents = [
+                        {**agent, "theories": f"熟练掌握{model_names_str}，{model_rec['overall_reason']}"}
+                        for agent in AGENT_ROLES
+                    ]
 
                 # ════════════════════════════════════════
                 # PHASE 1: Generate FULL initial draft (integrating recommended models)
@@ -572,7 +751,7 @@ class LessonTaskHandler:
                 logger.info(f"[{lesson_id}] PHASE 1: Generating full integrated draft with {model_names_str}...")
                 await _emit("progress_update", {
                     "lesson_id": lesson_id, "progress": 12,
-                    "stage": "phase_drafts", "message": f"正在生成初步教案（融合{model_names_str}）...",
+                    "stage": "phase_drafts", "message": _progress_msg("generating_draft", lesson_locale, model=model_names_str),
                 }, room)
 
                 full_draft = await self._generate_full_draft_stream(
@@ -620,7 +799,7 @@ class LessonTaskHandler:
                     await _emit("progress_update", {
                         "lesson_id": lesson_id, "status": "awaiting_confirmation",
                         "progress": 40, "stage": "awaiting_confirmation",
-                        "phase": "draft_done", "message": "初步教案已生成，等待教师确认",
+                        "phase": "draft_done", "message": _progress_msg("draft_done_awaiting", lesson_locale),
                     }, room)
                     return
 
@@ -629,7 +808,7 @@ class LessonTaskHandler:
                 # ════════════════════════════════════════
                 await _emit("progress_update", {
                     "lesson_id": lesson_id, "progress": 45,
-                    "stage": "phase_optimize", "message": "初步教案已完成，开始按理论环节教研讨论...",
+                    "stage": "phase_optimize", "message": _progress_msg("draft_done_discussing", lesson_locale),
                 }, room)
                 logger.info(f"[{lesson_id}] PHASE 2: Per-model discussion ({total_discussion} stages)...")
 
@@ -783,19 +962,21 @@ class LessonTaskHandler:
 
                 # Phase 0: Qwen model recommendation (also in quick mode)
                 logger.info(f"[{lesson_id}] QUICK Phase 0: Model recommendation...")
+                lesson_locale = getattr(lesson, "locale", None) or "zh-CN"
                 await _emit("progress_update", {
                     "lesson_id": lesson_id, "progress": 5,
-                    "stage": "model_recommendation", "message": "AI正在分析最适合的教学模型...",
+                    "stage": "model_recommendation",
+                    "message": _progress_msg("analyzing_model", lesson_locale),
                 }, room)
                 model_rec = await self._recommend_teaching_models(lesson, room, context, session)
                 active_models = model_rec["selected_models"]
-                theories_framework = _build_theories_framework(active_models)
-                model_names_str = "、".join(m["name"] for m in active_models)
+                theories_framework = _build_theories_framework(active_models, lesson_locale)
+                model_names_str = ", ".join(m["name"] for m in active_models) if lesson_locale == "en" else "、".join(m["name"] for m in active_models)
 
                 logger.info(f"[{lesson_id}] QUICK: Generating full draft with {model_names_str}...")
                 await _emit("progress_update", {
                     "lesson_id": lesson_id, "progress": 15,
-                    "stage": "phase_drafts", "message": f"正在快速生成教案（{model_names_str}）...",
+                    "stage": "phase_drafts", "message": _progress_msg("quick_generating", lesson_locale, model=model_names_str),
                 }, room)
 
                 full_draft = await self._generate_full_draft_stream(
@@ -855,8 +1036,9 @@ class LessonTaskHandler:
                 fc = lesson.final_content or {}
                 model_rec = fc.get("model_recommendation", {})
                 active_models = model_rec.get("selected_models", [])
-                theories_framework = _build_theories_framework(active_models)
-                model_names_str = "、".join(m["name"] for m in active_models)
+                lesson_locale = getattr(lesson, "locale", None) or "zh-CN"
+                theories_framework = _build_theories_framework(active_models, lesson_locale)
+                model_names_str = ", ".join(m["name"] for m in active_models) if lesson_locale == "en" else "、".join(m["name"] for m in active_models)
 
                 full_draft = await self._generate_full_draft_stream(
                     lesson, room, context, session,
@@ -890,7 +1072,7 @@ class LessonTaskHandler:
                     await _emit("progress_update", {
                         "lesson_id": lesson_id, "status": "awaiting_confirmation",
                         "progress": 40, "stage": "awaiting_confirmation",
-                        "phase": "draft_done", "message": "初步教案已生成，等待教师确认",
+                        "phase": "draft_done", "message": _progress_msg("draft_done_awaiting", lesson_locale),
                     }, room)
                     return
 
@@ -915,8 +1097,9 @@ class LessonTaskHandler:
                 fc = lesson.final_content or {}
                 model_rec = fc.get("model_recommendation", {})
                 active_models = model_rec.get("selected_models", [])
-                theories_framework = _build_theories_framework(active_models)
-                model_names_str = "、".join(m["name"] for m in active_models)
+                lesson_locale = getattr(lesson, "locale", None) or "zh-CN"
+                theories_framework = _build_theories_framework(active_models, lesson_locale)
+                model_names_str = ", ".join(m["name"] for m in active_models) if lesson_locale == "en" else "、".join(m["name"] for m in active_models)
                 full_draft = fc.get("full_draft", "")
                 all_final_stages = fc.get("stages", {})
                 discussion_stages = _build_discussion_stages_for(active_models)
@@ -938,7 +1121,13 @@ class LessonTaskHandler:
         total_discussion = len(discussion_stages)
         model_rec = (lesson.final_content or {}).get("model_recommendation", {})
         overall_reason = model_rec.get("overall_reason", "")
-        theories_suffix = f"熟练掌握{model_names_str}，{overall_reason}" if overall_reason else f"熟练掌握{model_names_str}"
+        lesson_locale = getattr(lesson, "locale", None) or "zh-CN"
+        if lesson_locale == "en":
+            theories_suffix = f"Proficient in {model_names_str}. {overall_reason}" if overall_reason else f"Proficient in {model_names_str}"
+        elif lesson_locale == "zh-TW":
+            theories_suffix = f"熟練掌握{model_names_str}，{overall_reason}" if overall_reason else f"熟練掌握{model_names_str}"
+        else:
+            theories_suffix = f"熟练掌握{model_names_str}，{overall_reason}" if overall_reason else f"熟练掌握{model_names_str}"
         local_agents = [
             {**agent, "theories": theories_suffix}
             for agent in AGENT_ROLES
@@ -1043,7 +1232,14 @@ class LessonTaskHandler:
         }, room)
 
         grade_info = lesson.specific_grade or lesson.grade_level
-        student_info = f"\n学生类型：{lesson.student_type}" if lesson.student_type else ""
+        lesson_locale = getattr(lesson, "locale", None) or "zh-CN"
+
+        if lesson_locale == "en":
+            student_info = f"\nStudent Type: {lesson.student_type}" if lesson.student_type else ""
+        elif lesson_locale == "zh-TW":
+            student_info = f"\n學生類型：{lesson.student_type}" if lesson.student_type else ""
+        else:
+            student_info = f"\n学生类型：{lesson.student_type}" if lesson.student_type else ""
 
         preferred_theory = getattr(lesson, 'teaching_model_id', None) or ""
         if preferred_theory in ("all", ""):
@@ -1054,7 +1250,80 @@ class LessonTaskHandler:
                 lesson, room, preferred_theory, grade_info, student_info,
             )
 
-        prompt = f"""你是资深教育专家和课程设计专家。请深度分析以下课程信息，从教育学理论角度独立推导最适合的教学模型。
+        if lesson_locale == "en":
+            prompt = f"""You are a senior education expert and curriculum design specialist. Please conduct an in-depth analysis of the following course information and independently derive the most suitable teaching model from a pedagogical theory perspective.
+
+[Course Information]
+Subject: {lesson.subject}
+Topic: {lesson.topic or lesson.title}
+Grade: {grade_info}{student_info}
+
+[Analysis Requirements]
+Please think deeply from the following dimensions:
+1. Core competencies and characteristics of the subject
+2. Nature of the knowledge in this topic (conceptual construction / skill training / emotional experience / project inquiry, etc.)
+3. Cognitive development patterns of students at this age
+4. Most effective learning methods and instructional formats
+
+Based on the above analysis, recommend the single most suitable teaching model (from any pedagogical domain, e.g. 5E Model, BOPPPS, PBL, Unit Design, Deep Learning Model, Flipped Classroom, Situational Teaching, Task-Based Language Teaching, Scaffolded Instruction, Cooperative Learning, or any other model you deem more appropriate). Recommend only the best-matching one and explain in detail why it is most suitable.
+
+[IMPORTANT] The "stages" field MUST list ALL complete stages of the teaching model — do not omit any!
+For example: 5E must have 5 stages (Engage, Explore, Explain, Elaborate, Evaluate); BOPPPS must have 6 stages; PBL at least 5 stages. List all stages according to the model's standard definition.
+
+[Output Format] (strictly follow this JSON format, output nothing else):
+{{
+  "overall_reason": "In-depth analysis of the subject and topic, explaining why this model is chosen (150-250 words, covering subject characteristics, knowledge nature, student cognitive patterns)",
+  "selected_models": [
+    {{
+      "key": "model_key_lowercase_english",
+      "name": "Teaching model name (in English)",
+      "reason": "Detailed rationale for why this model best fits this subject/topic (100-200 words)",
+      "stages": ["Stage 1 name", "Stage 2 name", "...", "Last stage name (list ALL, no omission)"]
+    }}
+  ]
+}}"""
+            sys_msg = "You are a senior education expert and curriculum design specialist. Analyze the subject and topic, recommend the single most suitable teaching model from a pedagogical perspective. Output strictly in JSON format with selected_models containing exactly 1 model. All output must be in English."
+
+        elif lesson_locale == "zh-TW":
+            prompt = f"""你是資深教育專家和課程設計專家。請深度分析以下課程信息，從教育學理論角度獨立推導最適合的教學模型。
+
+【課程信息】
+科目：{lesson.subject}
+課題/主題：{lesson.topic or lesson.title}
+年級：{grade_info}{student_info}
+
+【分析要求】
+請從以下維度深度思考：
+1. 該學科的核心素養和學科特點
+2. 該課題的知識性質（概念建構/技能訓練/情感體驗/項目探究等）
+3. 該年齡段學生的認知發展規律
+4. 最有效的學習方式和教學組織形式
+
+基於以上分析，推薦1個最適合的教學模型（可以是任何教育學領域的模型，
+如5E模型、BOPPPS、PBL、單元整體教學、深度學習模型、翻轉課堂、情境教學、
+任務型教學法、支架式教學、合作學習等，也可以是你認為更合適的其他模型）。
+只推薦最匹配的1個，並詳細說明為什麼這個模型最適合此課題。
+
+【重要】stages欄位必須列出該教學模型的所有完整階段，不能遺漏！
+例如：5E模型必須有5個階段(Engage,Explore,Explain,Elaborate,Evaluate)；
+BOPPPS必須有6個階段；PBL至少有5個階段。請按照該模型的標準定義列出全部階段。
+
+【輸出格式】（嚴格按此JSON格式輸出，不要輸出其他內容）：
+{{
+  "overall_reason": "對該科目和課題的深度分析，說明為什麼選擇這個模型（150-250字，包含學科特點、知識性質、學生認知規律等分析）",
+  "selected_models": [
+    {{
+      "key": "model_key_lowercase_english",
+      "name": "教學模型名稱",
+      "reason": "為什麼該模型最適合這個科目/課題的詳細理由（100-200字）",
+      "stages": ["該模型的第1階段名稱", "第2階段名稱", "...", "最後階段名稱（列出全部，不得省略）"]
+    }}
+  ]
+}}"""
+            sys_msg = f"你是資深教育專家和課程設計專家。請根據學科和課題特點，從教育學理論角度分析並推薦1個最適合的教學模型。嚴格按JSON格式輸出，selected_models陣列只包含1個模型。請全程使用繁體中文。"
+
+        else:
+            prompt = f"""你是资深教育专家和课程设计专家。请深度分析以下课程信息，从教育学理论角度独立推导最适合的教学模型。
 
 【课程信息】
 科目：{lesson.subject}
@@ -1089,8 +1358,7 @@ BOPPPS必须有6个阶段；PBL至少有5个阶段。请按照该模型的标准
     }}
   ]
 }}"""
-
-        sys_msg = f"你是资深教育专家和课程设计专家。请根据学科和课题特点，从教育学理论角度分析并推荐1个最适合的教学模型。严格按JSON格式输出，selected_models数组只包含1个模型。{_locale_hint(lesson)}"
+            sys_msg = f"你是资深教育专家和课程设计专家。请根据学科和课题特点，从教育学理论角度分析并推荐1个最适合的教学模型。严格按JSON格式输出，selected_models数组只包含1个模型。{_locale_hint(lesson)}"
 
         full_text = ""
         chunk_count = 0
@@ -1121,7 +1389,8 @@ BOPPPS必须有6个阶段；PBL至少有5个阶段。请按照该模型的标准
             "phase": "model_recommendation",
         }, room)
 
-        result = _parse_model_recommendation(full_text)
+        lesson_locale = getattr(lesson, "locale", None) or "zh-CN"
+        result = _parse_model_recommendation(full_text, lesson_locale)
         logger.info(f"[{lesson.id}] Phase 0 done: recommended {[m['name'] for m in result['selected_models']]}")
         return result
 
@@ -1132,9 +1401,39 @@ BOPPPS必须有6个阶段；PBL至少有5个阶段。请按照该模型的标准
         """Teacher already chose a theory in semi-auto mode — use it directly,
         only ask AI to explain how it applies to this specific lesson."""
         model_key = re.sub(r'[^a-z0-9_]', '_', preferred_theory.lower())[:20]
-        stages = _get_known_model_stages(model_key, preferred_theory)
+        lesson_locale = getattr(lesson, "locale", None) or "zh-CN"
+        stages = _get_known_model_stages(model_key, preferred_theory, lesson_locale)
 
-        prompt = f"""你是资深教育专家。教师已经为本节课选定了教学理论/模型：「{preferred_theory}」。
+        if lesson_locale == "en":
+            prompt = f"""You are a senior education expert. The teacher has selected the following teaching theory/model for this lesson: "{preferred_theory}".
+Please explain how this theory can be specifically applied to this lesson and its advantages, based on the course information below.
+
+[Course Information]
+Subject: {lesson.subject}
+Topic: {lesson.topic or lesson.title}
+Grade: {grade_info}{student_info}
+
+Please write 150-250 words briefly explaining the applicability and application strategy of "{preferred_theory}" in this lesson.
+Do not recommend other models — focus solely on "{preferred_theory}"."""
+            sys_msg = f'You are a senior education expert. The teacher has selected "{preferred_theory}". Analyze its applicability to this lesson. Output analysis text only, no JSON. All output must be in English.'
+            fallback_text = f'The teacher selected "{preferred_theory}" as the teaching theory for this lesson.'
+
+        elif lesson_locale == "zh-TW":
+            prompt = f"""你是資深教育專家。教師已經為本節課選定了教學理論/模型：「{preferred_theory}」。
+請針對以下課程信息，說明該理論如何具體應用於本節課，以及它的優勢所在。
+
+【課程信息】
+科目：{lesson.subject}
+課題/主題：{lesson.topic or lesson.title}
+年級：{grade_info}{student_info}
+
+請用150-250字簡要闡述「{preferred_theory}」在本節課中的適用性和應用策略。
+不需要推薦其他模型，直接圍繞「{preferred_theory}」展開分析。"""
+            sys_msg = f"你是資深教育專家。教師已選定「{preferred_theory}」，請圍繞該理論分析其在本節課的適用性。直接輸出分析文字，不要輸出JSON。請全程使用繁體中文。"
+            fallback_text = f"教師選定「{preferred_theory}」作為本節課的教學理論。"
+
+        else:
+            prompt = f"""你是资深教育专家。教师已经为本节课选定了教学理论/模型：「{preferred_theory}」。
 请针对以下课程信息，说明该理论如何具体应用于本节课，以及它的优势所在。
 
 【课程信息】
@@ -1144,8 +1443,8 @@ BOPPPS必须有6个阶段；PBL至少有5个阶段。请按照该模型的标准
 
 请用150-250字简要阐述「{preferred_theory}」在本节课中的适用性和应用策略。
 不需要推荐其他模型，直接围绕「{preferred_theory}」展开分析。"""
-
-        sys_msg = f"你是资深教育专家。教师已选定「{preferred_theory}」，请围绕该理论分析其在本节课的适用性。直接输出分析文字，不要输出JSON。{_locale_hint(lesson)}"
+            sys_msg = f"你是资深教育专家。教师已选定「{preferred_theory}」，请围绕该理论分析其在本节课的适用性。直接输出分析文字，不要输出JSON。{_locale_hint(lesson)}"
+            fallback_text = f"教师选定「{preferred_theory}」作为本节课的教学理论。"
 
         full_text = ""
         try:
@@ -1160,7 +1459,7 @@ BOPPPS必须有6个阶段；PBL至少有5个阶段。请按照该模型的标准
                 }, room)
         except Exception as e:
             logger.warning(f"Teacher-selected model reason generation failed: {e}")
-            full_text = f"教师选定「{preferred_theory}」作为本节课的教学理论。"
+            full_text = fallback_text
 
         await _emit("stream_end", {
             "lesson_id": lesson.id, "stage": 0,
@@ -1197,19 +1496,26 @@ BOPPPS必须有6个阶段；PBL至少有5个阶段。请按照该模型的标准
 
         is_macau = _is_macau_or_hk(getattr(lesson, 'region', '') or '')
 
+        lesson_locale = getattr(lesson, "locale", None) or "zh-CN"
         if not active_models:
             rec = (lesson.final_content or {}).get("model_recommendation", {})
             active_models = rec.get("selected_models", [])
         if not theories_framework:
-            theories_framework = _build_theories_framework(active_models) if active_models else ""
+            theories_framework = _build_theories_framework(active_models, lesson_locale) if active_models else ""
         if not model_names_str:
-            model_names_str = active_models[0]["name"] if active_models else "BOPPPS教学模型"
+            fb_name = _FALLBACK_RECOMMENDATION[lesson_locale]["name"]
+            model_names_str = active_models[0]["name"] if active_models else fb_name
 
-        stages_desc = _build_stages_description_for(active_models) if active_models else ""
+        stages_desc = _build_stages_description_for(active_models, lesson_locale) if active_models else ""
 
         avoid_note = ""
         if lesson.avoid_issues:
-            avoid_note = f"\n特别注意: 避免以下问题: {lesson.avoid_issues}"
+            if lesson_locale == "en":
+                avoid_note = f"\nIMPORTANT: Avoid the following issues: {lesson.avoid_issues}"
+            elif lesson_locale == "zh-TW":
+                avoid_note = f"\n特別注意: 避免以下問題: {lesson.avoid_issues}"
+            else:
+                avoid_note = f"\n特别注意: 避免以下问题: {lesson.avoid_issues}"
 
         if is_macau:
             prompt = f"""請根據以下主題和內容，生成一份完整的教案。本教案採用{model_names_str}，請嚴格按照該模型的教學階段組織教學流程。
@@ -1397,14 +1703,16 @@ AI教師
         }, room)
 
         is_macau = _is_macau_or_hk(getattr(lesson, 'region', '') or '')
+        lesson_locale = getattr(lesson, "locale", None) or "zh-CN"
 
         if not active_models:
             rec = (lesson.final_content or {}).get("model_recommendation", {})
             active_models = rec.get("selected_models", [])
         if not theories_framework:
-            theories_framework = _build_theories_framework(active_models) if active_models else ""
+            theories_framework = _build_theories_framework(active_models, lesson_locale) if active_models else ""
         if not model_names_str:
-            model_names_str = active_models[0]["name"] if active_models else "BOPPPS教学模型"
+            fb_name = _FALLBACK_RECOMMENDATION[lesson_locale]["name"]
+            model_names_str = active_models[0]["name"] if active_models else fb_name
 
         per_stage_content = ""
         if active_models:
@@ -1534,17 +1842,24 @@ AI教師
         }, room)
 
         is_macau = _is_macau_or_hk(getattr(lesson, 'region', '') or '')
+        lesson_locale = getattr(lesson, "locale", None) or "zh-CN"
 
         rec = (lesson.final_content or {}).get("model_recommendation", {})
         _active_models = rec.get("selected_models", [])
         if not theories_framework:
-            theories_framework = _build_theories_framework(_active_models) if _active_models else ""
+            theories_framework = _build_theories_framework(_active_models, lesson_locale) if _active_models else ""
         if not model_names_str:
-            model_names_str = _active_models[0]["name"] if _active_models else "BOPPPS教学模型"
+            fb_name = _FALLBACK_RECOMMENDATION[lesson_locale]["name"]
+            model_names_str = _active_models[0]["name"] if _active_models else fb_name
 
         avoid_note = ""
         if lesson.avoid_issues:
-            avoid_note = f"\n- 避免以下问题: {lesson.avoid_issues}"
+            if lesson_locale == "en":
+                avoid_note = f"\n- Avoid the following issues: {lesson.avoid_issues}"
+            elif lesson_locale == "zh-TW":
+                avoid_note = f"\n- 避免以下問題: {lesson.avoid_issues}"
+            else:
+                avoid_note = f"\n- 避免以下问题: {lesson.avoid_issues}"
 
         prompt = f"""请为教案中的"{stage_name}"环节撰写初步教案草稿。
 该环节属于对应教学模型中的一个具体阶段。
@@ -1975,15 +2290,22 @@ AI教師
         }, room)
 
         is_macau = _is_macau_or_hk(getattr(lesson, 'region', '') or '')
+        lesson_locale = getattr(lesson, "locale", None) or "zh-CN"
 
         if not model_names_str:
             rec = (lesson.final_content or {}).get("model_recommendation", {})
             active_models = rec.get("selected_models", [])
-            model_names_str = active_models[0]["name"] if active_models else "BOPPPS教学模型"
+            fb_name = _FALLBACK_RECOMMENDATION[lesson_locale]["name"]
+            model_names_str = active_models[0]["name"] if active_models else fb_name
 
         avoid_note = ""
         if lesson.avoid_issues:
-            avoid_note = f"\n- 避免以下问题: {lesson.avoid_issues}"
+            if lesson_locale == "en":
+                avoid_note = f"\n- Avoid the following issues: {lesson.avoid_issues}"
+            elif lesson_locale == "zh-TW":
+                avoid_note = f"\n- 避免以下問題: {lesson.avoid_issues}"
+            else:
+                avoid_note = f"\n- 避免以下问题: {lesson.avoid_issues}"
 
         prompt = f"""基于初步教案草稿和被采纳的专家改进意见，生成"{stage_name}"环节的最终优化教案。
 该环节对应{model_names_str}的教学阶段。
@@ -2060,28 +2382,42 @@ AI教師
                     await session.delete(d)
                 await session.commit()
 
+                lesson_locale = getattr(lesson, "locale", None) or "zh-CN"
                 await _emit("progress_update", {
                     "lesson_id": lesson_id, "status": "processing",
-                    "progress": 2, "stage": "model_recommendation", "message": "AI正在重新分析最适合的教学模型...",
+                    "progress": 2, "stage": "model_recommendation",
+                    "message": _progress_msg("regen_analyzing_model", lesson_locale),
                 }, room)
 
                 model_rec = await self._recommend_teaching_models(lesson, room, context, session)
                 active_models = model_rec["selected_models"]
-                theories_framework = _build_theories_framework(active_models)
-                model_names_str = "、".join(m["name"] for m in active_models)
+                theories_framework = _build_theories_framework(active_models, lesson_locale)
+                model_names_str = ", ".join(m["name"] for m in active_models) if lesson_locale == "en" else "、".join(m["name"] for m in active_models)
 
                 lesson.final_content = {"model_recommendation": model_rec}
                 lesson.progress = 10
                 await session.commit()
 
-                local_agents = [
-                    {**agent, "theories": f"熟练掌握{model_names_str}，{model_rec['overall_reason']}"}
-                    for agent in AGENT_ROLES
-                ]
+                if lesson_locale == "en":
+                    local_agents = [
+                        {**agent, "theories": f"Proficient in {model_names_str}. {model_rec['overall_reason']}"}
+                        for agent in AGENT_ROLES
+                    ]
+                elif lesson_locale == "zh-TW":
+                    local_agents = [
+                        {**agent, "theories": f"熟練掌握{model_names_str}，{model_rec['overall_reason']}"}
+                        for agent in AGENT_ROLES
+                    ]
+                else:
+                    local_agents = [
+                        {**agent, "theories": f"熟练掌握{model_names_str}，{model_rec['overall_reason']}"}
+                        for agent in AGENT_ROLES
+                    ]
 
                 await _emit("progress_update", {
                     "lesson_id": lesson_id, "progress": 12,
-                    "stage": "phase_drafts", "message": f"正在重新生成初步教案（{model_names_str}）...",
+                    "stage": "phase_drafts",
+                    "message": _progress_msg("regen_draft", lesson_locale, model=model_names_str),
                 }, room)
 
                 full_draft = await self._generate_full_draft_stream(
@@ -2118,7 +2454,7 @@ AI教師
                 await _emit("all_drafts_ready", {"lesson_id": lesson_id, "total_stages": total_discussion}, room)
                 await _emit("progress_update", {
                     "lesson_id": lesson_id, "progress": 45,
-                    "stage": "phase_optimize", "message": "初步教案已重新生成，开始按理论环节教研讨论...",
+                    "stage": "phase_optimize", "message": _progress_msg("regen_draft_done_discussing", lesson_locale),
                 }, room)
 
                 for ds in discussion_stages:
@@ -2237,9 +2573,10 @@ AI教師
                     lesson.final_content = fc
                 await session.commit()
 
+                lesson_locale = getattr(lesson, "locale", None) or "zh-CN"
                 await _emit("progress_update", {
                     "lesson_id": lesson_id, "status": "processing",
-                    "progress": 80, "stage": "re_optimize", "message": "正在二次优化教案...",
+                    "progress": 80, "stage": "re_optimize", "message": _progress_msg("re_optimizing", lesson_locale),
                 }, room)
 
                 full_optimized = await self._generate_full_optimized_stream(
@@ -2287,8 +2624,9 @@ AI教師
 
             rec = (lesson.final_content or {}).get("model_recommendation", {})
             active_models = rec.get("selected_models", [])
-            theories_framework = _build_theories_framework(active_models) if active_models else None
-            model_names_str = "、".join(m["name"] for m in active_models) if active_models else None
+            lesson_locale = getattr(lesson, "locale", None) or "zh-CN"
+            theories_framework = _build_theories_framework(active_models, lesson_locale) if active_models else None
+            model_names_str = (", ".join(m["name"] for m in active_models) if lesson_locale == "en" else "、".join(m["name"] for m in active_models)) if active_models else None
 
             discussion_stages = _build_discussion_stages_for(active_models) if active_models else []
             stage_num = next(

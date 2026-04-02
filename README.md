@@ -77,34 +77,38 @@ setup.bat
 start.bat
 ```
 
-启动后访问：
-- 前端：http://localhost:3002
-- 后端 API：http://localhost:8001
-- API 文档：http://localhost:8001/docs
+启动后访问（与 `frontend/vite.config.ts` 代理一致）：
+- 前端：http://localhost:3000
+- 后端 API / Socket.IO：http://localhost:3002
+- API 文档：http://localhost:3002/docs
+
+> 一键脚本会调用 `backend\dev_server.bat`，自动识别 **`.venv` 或 `venv`**，且必须使用 **`app.main:socket_app`** 才能启用实时进度。  
+> 前端固定 **3000**（`strictPort: true`），避免 Vite 自动改用 **3002** 与后端抢端口。
 
 ### 方式二：分别启动
 
-**后端（端口 8001）：**
+**后端（端口 3002）：**
 
 ```bash
 cd backend
-setup.bat                            # 首次运行：创建 venv + 安装依赖
-.venv\Scripts\python.exe -m uvicorn app.main:application --host 0.0.0.0 --port 8001 --reload
+setup.bat                            # 首次运行：创建 .venv + 安装依赖
+# Windows：双击 dev_server.bat，或：
+.venv\Scripts\python.exe -m uvicorn app.main:socket_app --host 0.0.0.0 --port 3002 --reload
 ```
 
-**前端（端口 3002）：**
+**前端（端口 3000，代理到 3002）：**
 
 ```bash
 cd frontend
 npm install                          # 首次运行
-npm run dev                          # 启动开发服务器（自动代理到后端 8001）
+npm run dev                          # vite 固定 3000；/api 与 /socket.io 代理到 127.0.0.1:3002
 ```
 
 ### 方式三：Docker
 
 ```bash
 cp .env.example .env                 # 编辑填入各 AI 模型的 API Key
-docker compose up -d                 # 前端 :3002，后端 :8001
+docker compose up -d                 # 宿主机映射：前端 :3002 → 容器 80，后端 :8001 → 容器 8000
 ```
 
 ## 环境变量 (.env)
@@ -160,7 +164,7 @@ docker compose up -d                 # 前端 :3002，后端 :8001
 
 ## API 端点
 
-后端启动后访问 `http://localhost:8001/docs` 查看 Swagger 文档。
+本地开发：后端在 3002 时访问 `http://localhost:3002/docs` 查看 Swagger；Docker 映射为 `http://localhost:8001/docs`。
 
 ### 认证
 

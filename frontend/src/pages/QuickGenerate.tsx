@@ -10,16 +10,15 @@ import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
 import { ArrowLeft, Zap, Loader2, CheckCircle2, Eye } from 'lucide-react'
 
-const EXPORT_FORMATS = [
-  { key: 'json', label: 'JSON', icon: '{ }' },
-  { key: 'txt', label: 'TXT', icon: 'Aa' },
-  { key: 'markdown', label: 'Markdown', icon: 'Md' },
-  { key: 'docx', label: 'Word', icon: 'W' },
-  { key: 'pdf', label: 'PDF', icon: 'Pdf' },
-]
-
 export default function QuickGenerate() {
   const t = useT()
+  const EXPORT_FORMATS = [
+    { key: 'json', label: t('process.export_json'), icon: '{ }' },
+    { key: 'txt', label: t('process.export_txt'), icon: 'Aa' },
+    { key: 'markdown', label: t('process.export_markdown'), icon: 'Md' },
+    { key: 'docx', label: t('process.export_word'), icon: 'W' },
+    { key: 'pdf', label: t('process.export_pdf'), icon: 'Pdf' },
+  ]
   const navigate = useNavigate()
   const { createLesson, fetchLesson, currentLesson } = useLessonStore()
 
@@ -297,6 +296,11 @@ export default function QuickGenerate() {
               <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600">{error}</div>
             )}
 
+            <div className="mb-4">
+              <h2 className="text-lg font-semibold text-gray-900">{t('process.draft')}</h2>
+              <p className="text-sm text-gray-500 mt-1">{t('process.draft_desc')}</p>
+            </div>
+
             <Card className="relative">
               <div
                 ref={contentRef}
@@ -312,7 +316,7 @@ export default function QuickGenerate() {
                 ) : (
                   <div className="flex flex-col items-center justify-center py-20 text-gray-400">
                     <Loader2 className="w-8 h-8 animate-spin mb-3 text-amber-400" />
-                    <span className="text-sm">{t('quick.ai_generating')}</span>
+                    <span className="text-sm text-center max-w-sm">{t('process.waiting_draft')}</span>
                   </div>
                 )}
               </div>

@@ -165,7 +165,8 @@ export default function LessonResult() {
         {/* Document view */}
         {viewMode === 'optimized' && fullOptimized && (
           <Card>
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">{t('result.optimized_title')}</h2>
+            <h2 className="text-lg font-semibold text-gray-900">{t('result.optimized_title')}</h2>
+            <p className="text-sm text-gray-500 mt-1 mb-4">{t('process.optimized_desc')}</p>
             <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">
               {fullOptimized}
             </div>
@@ -174,7 +175,8 @@ export default function LessonResult() {
 
         {viewMode === 'draft' && fullDraft && (
           <Card>
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">{t('result.draft_title')}</h2>
+            <h2 className="text-lg font-semibold text-gray-900">{t('result.draft_title')}</h2>
+            <p className="text-sm text-gray-500 mt-1 mb-4">{t('process.draft_desc')}</p>
             <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">
               {fullDraft}
             </div>

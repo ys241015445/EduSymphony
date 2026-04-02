@@ -47,8 +47,8 @@ echo.
 echo ============================================
 echo   安装完成！
 echo.
-echo   启动后端: start.bat
-echo   API文档:  http://localhost:8001/docs
+echo   启动后端: start.bat 或 dev_server.bat
+echo   API文档:  http://localhost:3002/docs
 echo.
 echo   重要: 请先编辑 .env 文件填入 QWEN_API_KEY
 echo ============================================

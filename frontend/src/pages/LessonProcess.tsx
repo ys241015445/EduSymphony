@@ -4,6 +4,7 @@ import { useLessonStore } from '../stores/lessonStore'
 import { useAuthStore } from '../stores/authStore'
 import { getSocket, joinLesson, leaveLesson } from '../services/socket'
 import { useT } from '../i18n/translations'
+import { useLanguageStore } from '../stores/languageStore'
 import { api } from '../services/api'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
@@ -14,6 +15,7 @@ import AnnotationEditor from '../components/lesson/AnnotationEditor'
 import { ArrowLeft, FileText, Loader2, CheckCircle2, Clock, RefreshCw, Download, ChevronDown, FileType, X, Eye, Printer, BookOpen } from 'lucide-react'
 import StyledPdfModal from '../components/lesson/StyledPdfModal'
 import { useMaterialGenStore } from '../stores/materialGenStore'
+import { sanitizePreviewHtml } from '../utils/sanitizePreviewHtml'
 
 interface ActiveModel {
   key: string
@@ -549,9 +551,9 @@ export default function LessonProcess() {
   }, [showExportMenu])
 
   const EXPORT_FORMATS = [
-    { key: 'json', label: 'JSON', icon: '{ }', mime: 'application/json' },
+    { key: 'json', label: T('process.export_json'), icon: '{ }', mime: 'application/json' },
     { key: 'txt', label: T('process.export_txt'), icon: 'Aa', mime: 'text/plain' },
-    { key: 'markdown', label: 'Markdown', icon: 'Md', mime: 'text/markdown' },
+    { key: 'markdown', label: T('process.export_markdown'), icon: 'Md', mime: 'text/markdown' },
     { key: 'docx', label: T('process.export_word'), icon: 'W', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' },
     { key: 'pdf', label: T('process.export_pdf'), icon: 'Pdf', mime: 'application/pdf' },
   ]
@@ -778,7 +780,7 @@ export default function LessonProcess() {
                           opinion={d.opinion}
                           isAccepted={d.is_accepted}
                           votes={d.votes || null}
-                          timestamp={d.created_at ? new Date(d.created_at).toLocaleTimeString('zh-CN', { hour12: false }) : undefined}
+                          timestamp={d.created_at ? new Date(d.created_at).toLocaleTimeString(useLanguageStore.getState().locale, { hour12: false }) : undefined}
                           onRegenerate={() => handleRegenerateDiscussion(d.id)}
                           isRegenerating={regeneratingDiscussions.has(d.id)}
                         />
@@ -1098,6 +1100,14 @@ export default function LessonProcess() {
             ) : (
               /* ===== Document Panel (draft / optimized) ===== */
               <div className="max-w-3xl mx-auto p-6">
+                <div className="mb-4">
+                  <h2 className="text-lg font-semibold text-gray-900">
+                    {activeVersion === 'draft' ? T('process.draft') : T('process.optimized')}
+                  </h2>
+                  <p className="text-sm text-gray-500 mt-1">
+                    {activeVersion === 'draft' ? T('process.draft_desc') : T('process.optimized_desc')}
+                  </p>
+                </div>
                 {activeDocText ? (
                   <div>
                     {/* Action bar: Regenerate + Export */}
@@ -1179,12 +1189,12 @@ export default function LessonProcess() {
                       {activeVersion === 'draft' && !fullDraftText ? (
                         <>
                           <Loader2 className="w-8 h-8 animate-spin mb-3 text-brand-400" />
-                          <span className="text-sm">{T('process.waiting')}</span>
+                          <span className="text-sm text-center max-w-sm">{T('process.waiting_draft')}</span>
                         </>
                       ) : activeVersion === 'optimized' && !fullOptimizedText ? (
                         <>
                           <Clock className="w-8 h-8 mb-3" />
-                          <span className="text-sm">{T('process.waiting')}</span>
+                          <span className="text-sm text-center max-w-sm">{T('process.waiting_optimized')}</span>
                         </>
                       ) : null}
                     </div>
@@ -1228,7 +1238,7 @@ export default function LessonProcess() {
                 <button
                   onClick={() => {
                     const win = window.open('', '_blank')
-                    if (win) { win.document.write(previewingMaterial.html); win.document.close() }
+                    if (win) { win.document.write(sanitizePreviewHtml(previewingMaterial.html)); win.document.close() }
                   }}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
                 >
@@ -1237,7 +1247,7 @@ export default function LessonProcess() {
                 </button>
                 <button
                   onClick={() => {
-                    const blob = new Blob([previewingMaterial.html], { type: 'text/html;charset=utf-8' })
+                    const blob = new Blob([sanitizePreviewHtml(previewingMaterial.html)], { type: 'text/html;charset=utf-8' })
                     const url = URL.createObjectURL(blob)
                     const a = document.createElement('a')
                     a.href = url
@@ -1259,11 +1269,11 @@ export default function LessonProcess() {
             </div>
             <div className="flex-1 overflow-hidden">
               <iframe
-                srcDoc={previewingMaterial.html}
+                srcDoc={sanitizePreviewHtml(previewingMaterial.html)}
                 title="Course Material Preview"
                 className="w-full h-full border-0"
                 style={{ minHeight: '600px' }}
-                sandbox="allow-same-origin allow-scripts"
+                sandbox="allow-scripts"
               />
             </div>
           </div>
@@ -1356,7 +1366,7 @@ export default function LessonProcess() {
                 <button
                   onClick={() => {
                     const win = window.open('', '_blank')
-                    if (win) { win.document.write(styledPdfTask.html); win.document.close() }
+                    if (win) { win.document.write(sanitizePreviewHtml(styledPdfTask.html)); win.document.close() }
                   }}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
                 >
@@ -1367,7 +1377,7 @@ export default function LessonProcess() {
                   onClick={() => {
                     const win = window.open('', '_blank')
                     if (win) {
-                      win.document.write(styledPdfTask.html)
+                      win.document.write(sanitizePreviewHtml(styledPdfTask.html))
                       win.document.close()
                       win.onload = () => setTimeout(() => win.print(), 500)
                     }
@@ -1379,7 +1389,7 @@ export default function LessonProcess() {
                 </button>
                 <button
                   onClick={() => {
-                    const blob = new Blob([styledPdfTask.html], { type: 'text/html;charset=utf-8' })
+                    const blob = new Blob([sanitizePreviewHtml(styledPdfTask.html)], { type: 'text/html;charset=utf-8' })
                     const url = URL.createObjectURL(blob)
                     const a = document.createElement('a')
                     a.href = url
@@ -1401,11 +1411,11 @@ export default function LessonProcess() {
             </div>
             <div className="flex-1 overflow-hidden">
               <iframe
-                srcDoc={styledPdfTask.html}
+                srcDoc={sanitizePreviewHtml(styledPdfTask.html)}
                 title="Styled PDF Preview"
                 className="w-full h-full border-0"
                 style={{ minHeight: '600px' }}
-                sandbox="allow-same-origin"
+                sandbox="allow-popups allow-modals allow-downloads"
               />
             </div>
           </div>
