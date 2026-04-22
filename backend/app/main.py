@@ -5,7 +5,7 @@ import socketio
 
 from app.core.config import settings
 from app.core.database import engine, Base
-from app.api import auth, teaching_models, lessons, export, series
+from app.api import auth, teaching_models, lessons, export, series, system, course_tools
 
 
 @asynccontextmanager
@@ -13,6 +13,7 @@ async def lifespan(app: FastAPI):
     from app.core.database import init_db
     await init_db()
     await _seed_teaching_models()
+    await _seed_users()
 
     from app.tasks.scheduler import init_scheduler
     init_scheduler()
@@ -48,6 +49,8 @@ app.include_router(teaching_models.router, prefix="/api/v1")
 app.include_router(lessons.router, prefix="/api/v1")
 app.include_router(export.router, prefix="/api/v1")
 app.include_router(series.router, prefix="/api/v1")
+app.include_router(system.router, prefix="/api/v1")
+app.include_router(course_tools.router, prefix="/api/v1")
 
 
 @app.get("/")
@@ -85,6 +88,39 @@ async def leave_lesson(sid, data):
 
 
 application = socket_app
+
+SEED_USERS = [
+    ("lzf",     "lzf122406"),
+    ("ys",      "yellowsea"),
+    ("zhkj",    "zhkj1234"),
+    ("zhkj123", "zhkj123"),
+    ("zhkj456", "zhkj456"),
+]
+
+
+async def _seed_users():
+    import uuid as _uuid
+    from app.core.database import async_session_maker
+    from app.core.security import get_password_hash
+    from app.models.user import User
+    from sqlalchemy import select as _sel
+
+    async with async_session_maker() as session:
+        for uname, pwd in SEED_USERS:
+            exists = await session.execute(
+                _sel(User).where(User.username == uname)
+            )
+            if exists.scalar_one_or_none():
+                continue
+            session.add(User(
+                id=str(_uuid.uuid4()),
+                username=uname,
+                email=f"{uname}@edu.local",
+                password_hash=get_password_hash(pwd),
+                role="school",
+                quota_remaining=9999,
+            ))
+        await session.commit()
 
 
 async def _seed_teaching_models():

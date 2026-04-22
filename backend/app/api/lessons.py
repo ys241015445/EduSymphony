@@ -91,26 +91,14 @@ async def create_lesson(
     await db.commit()
     await db.refresh(lesson)
 
-    from app.tasks.scheduler import get_scheduler
     from app.tasks.lesson_task import LessonTaskHandler
+    from app.tasks.queue_manager import enqueue
     handler = LessonTaskHandler()
-    scheduler = get_scheduler()
 
     is_quick = mode == "quick"
     task_fn = handler.process_lesson_quick if is_quick else handler.process_lesson
-    job_id = f"{'quick' if is_quick else 'lesson'}_{lesson.id}"
-
-    if scheduler:
-        scheduler.add_job(
-            task_fn,
-            "date",
-            args=[lesson.id],
-            id=job_id,
-            replace_existing=True,
-        )
-        logger.info(f"Scheduled {'quick' if is_quick else 'full'} lesson job for {lesson.id}")
-    else:
-        logger.warning(f"Scheduler not available for lesson {lesson.id}")
+    await enqueue(lesson.id, task_fn)
+    logger.info(f"Enqueued {'quick' if is_quick else 'full'} lesson job for {lesson.id}")
 
     return LessonResponse.model_validate(lesson)
 
@@ -120,13 +108,34 @@ async def list_lessons(
     status: Optional[str] = None,
     limit: int = 20,
     offset: int = 0,
+    cursor: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    """
+    列出当前用户的教案。
+
+    分页参数二选一：
+    - cursor：ISO 时间戳（上一页最后一项的 created_at），**推荐**，性能恒定 O(limit)
+    - offset：兼容老版本；深分页 (offset > 1000) 时建议改用 cursor
+    """
+    safe_limit = max(1, min(limit, 100))
+
     query = select(LessonPlan).where(LessonPlan.user_id == current_user.id)
     if status:
         query = query.where(LessonPlan.status == status)
-    query = query.order_by(LessonPlan.created_at.desc()).limit(limit).offset(offset)
+
+    if cursor:
+        try:
+            from datetime import datetime as _dt
+            cursor_dt = _dt.fromisoformat(cursor.replace("Z", "+00:00"))
+            query = query.where(LessonPlan.created_at < cursor_dt)
+            query = query.order_by(LessonPlan.created_at.desc()).limit(safe_limit)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="cursor 时间格式无效")
+    else:
+        query = query.order_by(LessonPlan.created_at.desc()).limit(safe_limit).offset(max(0, offset))
+
     result = await db.execute(query)
     return [LessonListResponse.model_validate(l) for l in result.scalars().all()]
 
@@ -235,17 +244,9 @@ async def regenerate_draft(
         raise HTTPException(status_code=404, detail="教案不存在")
 
     from app.tasks.lesson_task import LessonTaskHandler
-    from app.tasks.scheduler import get_scheduler
+    from app.tasks.queue_manager import enqueue
     handler = LessonTaskHandler()
-    scheduler = get_scheduler()
-    if scheduler:
-        scheduler.add_job(
-            handler.regenerate_full_process, "date",
-            args=[lesson_id], id=f"regen_draft_{lesson_id}", replace_existing=True,
-        )
-    else:
-        import asyncio
-        asyncio.create_task(handler.regenerate_full_process(lesson_id))
+    await enqueue(lesson_id, handler.regenerate_full_process)
     return {"status": "ok", "message": "初步教案重新生成已启动"}
 
 
@@ -263,17 +264,9 @@ async def regenerate_optimized_endpoint(
         raise HTTPException(status_code=404, detail="教案不存在")
 
     from app.tasks.lesson_task import LessonTaskHandler
-    from app.tasks.scheduler import get_scheduler
+    from app.tasks.queue_manager import enqueue
     handler = LessonTaskHandler()
-    scheduler = get_scheduler()
-    if scheduler:
-        scheduler.add_job(
-            handler.regenerate_optimized, "date",
-            args=[lesson_id], id=f"regen_opt_{lesson_id}", replace_existing=True,
-        )
-    else:
-        import asyncio
-        asyncio.create_task(handler.regenerate_optimized(lesson_id))
+    await enqueue(lesson_id, handler.regenerate_optimized)
     return {"status": "ok", "message": "二次优化已启动"}
 
 
@@ -418,9 +411,8 @@ async def confirm_step(
     await db.commit()
 
     from app.tasks.lesson_task import LessonTaskHandler
-    from app.tasks.scheduler import get_scheduler
+    from app.tasks.queue_manager import enqueue
     handler = LessonTaskHandler()
-    scheduler = get_scheduler()
     current_phase = lesson.current_phase or ""
 
     if current_phase == "model_recommendation_done":
@@ -432,15 +424,7 @@ async def confirm_step(
     else:
         task_fn = handler.continue_after_model_recommendation
 
-    if scheduler:
-        scheduler.add_job(
-            task_fn, "date",
-            args=[lesson_id], id=f"confirm_{lesson_id}", replace_existing=True,
-        )
-    else:
-        import asyncio
-        asyncio.create_task(task_fn(lesson_id))
-
+    await enqueue(lesson_id, task_fn)
     return {"status": "ok", "message": "已确认，继续生成"}
 
 
@@ -513,14 +497,9 @@ async def generate_next_lesson(
     await db.commit()
     await db.refresh(new_lesson)
 
-    from app.tasks.scheduler import get_scheduler
     from app.tasks.lesson_task import LessonTaskHandler
+    from app.tasks.queue_manager import enqueue
     handler = LessonTaskHandler()
-    scheduler = get_scheduler()
-    if scheduler:
-        scheduler.add_job(
-            handler.process_lesson, "date",
-            args=[new_lesson.id], id=f"lesson_{new_lesson.id}", replace_existing=True,
-        )
+    await enqueue(new_lesson.id, handler.process_lesson)
 
     return LessonResponse.model_validate(new_lesson)

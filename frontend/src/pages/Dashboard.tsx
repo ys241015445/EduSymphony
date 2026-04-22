@@ -5,7 +5,7 @@ import { useT } from '../i18n/translations'
 import Header from '../components/layout/Header'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
-import { Plus, FileText, Clock, CheckCircle2, AlertCircle, Loader2, Trash2, Zap, BookOpen } from 'lucide-react'
+import { Plus, FileText, Clock, CheckCircle2, AlertCircle, Loader2, Trash2, Zap, BookOpen, Wrench } from 'lucide-react'
 
 const statusConfig: Record<string, { labelKey: string; color: string; icon: any }> = {
   queued: { labelKey: 'dashboard.status.queued', color: 'text-yellow-600 bg-yellow-50', icon: Clock },
@@ -106,6 +106,12 @@ export default function Dashboard() {
               <Button variant="secondary" className="!border-violet-300 !text-violet-700 !bg-violet-50 hover:!bg-violet-100">
                 <BookOpen className="w-4 h-4 mr-1.5" />
                 {t('dashboard.series')}
+              </Button>
+            </Link>
+            <Link to="/course-tools">
+              <Button variant="secondary" className="!border-teal-300 !text-teal-700 !bg-teal-50 hover:!bg-teal-100">
+                <Wrench className="w-4 h-4 mr-1.5" />
+                {t('dashboard.course_tools')}
               </Button>
             </Link>
             <Link to="/lesson/new">

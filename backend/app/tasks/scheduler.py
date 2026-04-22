@@ -10,11 +10,14 @@ def init_scheduler():
     global _scheduler
     executors = {
         'default': AsyncIOExecutor(),
-        'threadpool': ThreadPoolExecutor(max_workers=5),
+        'threadpool': ThreadPoolExecutor(max_workers=10),
     }
-    _scheduler = AsyncIOScheduler(executors=executors)
+    job_defaults = {
+        'misfire_grace_time': 300,
+    }
+    _scheduler = AsyncIOScheduler(executors=executors, job_defaults=job_defaults)
     _scheduler.start()
-    logger.info("任务调度器已启动 (default=AsyncIO, threadpool=5 workers)")
+    logger.info("任务调度器已启动 (default=AsyncIO, threadpool=10 workers)")
 
 
 def shutdown_scheduler():

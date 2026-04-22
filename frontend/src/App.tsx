@@ -1,5 +1,6 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { useAuthStore } from './stores/authStore'
+import Banner from './components/layout/Banner'
 import Landing from './pages/Landing'
 import Auth from './pages/Auth'
 import Dashboard from './pages/Dashboard'
@@ -9,6 +10,7 @@ import LessonProcess from './pages/LessonProcess'
 import LessonResult from './pages/LessonResult'
 import SeriesCreate from './pages/SeriesCreate'
 import SeriesDashboard from './pages/SeriesDashboard'
+import CourseTools from './pages/CourseTools'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const token = useAuthStore((s) => s.token)
@@ -18,6 +20,8 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   return (
+    <>
+    <Banner />
     <Routes>
       <Route path="/" element={<Landing />} />
       <Route path="/login" element={<Auth />} />
@@ -77,6 +81,15 @@ export default function App() {
           </ProtectedRoute>
         }
       />
+      <Route
+        path="/course-tools/:lessonId?"
+        element={
+          <ProtectedRoute>
+            <CourseTools />
+          </ProtectedRoute>
+        }
+      />
     </Routes>
+    </>
   )
 }

@@ -13,25 +13,19 @@ interface User {
 interface AuthState {
   token: string | null
   user: User | null
-  login: (email: string, password: string) => Promise<void>
-  register: (username: string, email: string, password: string) => Promise<void>
+  login: (username: string, password: string) => Promise<void>
   logout: () => void
   fetchMe: () => Promise<void>
 }
 
 export const useAuthStore = create<AuthState>()(
   persist(
-    (set, get) => ({
+    (set) => ({
       token: null,
       user: null,
 
-      login: async (email, password) => {
-        const res = await api.post('/api/v1/auth/login', { email, password })
-        set({ token: res.data.access_token, user: res.data.user })
-      },
-
-      register: async (username, email, password) => {
-        const res = await api.post('/api/v1/auth/register', { username, email, password })
+      login: async (username, password) => {
+        const res = await api.post('/api/v1/auth/login', { username, password })
         set({ token: res.data.access_token, user: res.data.user })
       },
 

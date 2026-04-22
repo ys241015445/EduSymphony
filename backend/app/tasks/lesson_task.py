@@ -368,6 +368,32 @@ async def _emit(event: str, data: dict, room: Optional[str] = None):
         logger.warning(f"Socket not available for event {event}")
 
 
+async def _release_connection(session: AsyncSession) -> None:
+    """把数据库连接交还给连接池。
+
+    使用场景：在即将进行一次长时间 AI 调用（>10s）之前调用，避免该连接
+    长时间空转占用 Supabase 后端槽位。调用后 session 仍可继续使用
+    ——SQLAlchemy 会在下一条语句时自动开启新事务并重新从池取连接。
+
+    典型用法：
+        await session.commit()
+        await _release_connection(session)
+        result = await ai_service.generate(...)   # 这段时间不持连接
+        await session.execute(...)                # 自动重新 check-out
+    """
+    try:
+        # 如有未提交变更，先刷盘；有 in-progress 事务则提交
+        if session.in_transaction():
+            await session.commit()
+        # 关闭底层连接并释放到连接池，但保持 Session 可再次使用
+        bind = session.get_bind()
+        await session.close()
+        # 兜底：确保与底层引擎解绑（SQLAlchemy 2.x close 通常已处理）
+        _ = bind
+    except Exception as e:
+        logger.warning(f"_release_connection failed: {e}")
+
+
 def _strip_markdown(text: str) -> str:
     text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
@@ -2374,12 +2400,11 @@ AI教師
                 room = f"lesson_{lesson_id}"
                 context = _build_context(lesson)
 
-                # Clear old discussions
-                old_discs = await session.execute(
-                    select(Discussion).where(Discussion.lesson_plan_id == lesson_id)
+                # Clear old discussions (bulk DELETE, avoid N+1 row-by-row)
+                from sqlalchemy import delete as _sql_delete
+                await session.execute(
+                    _sql_delete(Discussion).where(Discussion.lesson_plan_id == lesson_id)
                 )
-                for d in old_discs.scalars().all():
-                    await session.delete(d)
                 await session.commit()
 
                 lesson_locale = getattr(lesson, "locale", None) or "zh-CN"

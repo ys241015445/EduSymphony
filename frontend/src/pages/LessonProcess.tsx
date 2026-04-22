@@ -12,7 +12,7 @@ import AgentCard from '../components/lesson/AgentCard'
 import SectionPanel, { Section } from '../components/lesson/SectionPanel'
 import VoteResult from '../components/lesson/VoteResult'
 import AnnotationEditor from '../components/lesson/AnnotationEditor'
-import { ArrowLeft, FileText, Loader2, CheckCircle2, Clock, RefreshCw, Download, ChevronDown, FileType, X, Eye, Printer, BookOpen } from 'lucide-react'
+import { ArrowLeft, FileText, Loader2, CheckCircle2, Clock, RefreshCw, Download, ChevronDown, FileType, X, Eye, Printer, BookOpen, Wrench } from 'lucide-react'
 import StyledPdfModal from '../components/lesson/StyledPdfModal'
 import { useMaterialGenStore } from '../stores/materialGenStore'
 import { sanitizePreviewHtml } from '../utils/sanitizePreviewHtml'
@@ -669,6 +669,12 @@ export default function LessonProcess() {
           </div>
 
           <div className="flex items-center gap-4">
+            <Link to={`/course-tools/${id}`}>
+              <Button variant="ghost" size="sm" className="!text-teal-600 hover:!bg-teal-50">
+                <Wrench className="w-4 h-4 mr-1" />
+                {T('tools.title')}
+              </Button>
+            </Link>
             <div className="flex items-center gap-2 text-sm text-gray-500">
               <Clock className="w-4 h-4 text-gray-400" />
               <span className="text-gray-500 font-mono">{formatElapsed(elapsedSeconds)}</span>

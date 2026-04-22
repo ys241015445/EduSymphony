@@ -11,7 +11,11 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     APP_DEBUG: bool = True
 
-    DATABASE_URL: str = f"sqlite+aiosqlite:///{os.path.join(DATA_DIR, 'edusymphony.db')}"
+    DATABASE_URL: str = "postgresql+asyncpg://postgres:lzf04193290!@db.sadalarrjljxqmfwhrlu.supabase.co:5432/postgres"
+
+    SUPABASE_URL: str = "https://sadalarrjljxqmfwhrlu.supabase.co/rest/v1/"
+    SUPABASE_ANON_KEY: str = ""
+    SUPABASE_SERVICE_ROLE_KEY: str = ""
 
     JWT_SECRET: str = "change-me-in-production-edusymphony-2026"
     JWT_ALGORITHM: str = "HS256"

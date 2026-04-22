@@ -105,13 +105,8 @@ async def create_series(
     await db.commit()
     await db.refresh(series)
 
-    from app.tasks.scheduler import get_scheduler
-    scheduler = get_scheduler()
-    if scheduler:
-        scheduler.add_job(
-            _generate_syllabus, "date",
-            args=[series.id], id=f"syllabus_{series.id}", replace_existing=True,
-        )
+    from app.tasks.queue_manager import enqueue
+    await enqueue(series.id, _generate_syllabus)
 
     return SeriesResponse.model_validate(series)
 
@@ -183,10 +178,9 @@ async def generate_all_lessons(
     syllabus = series.syllabus
     lessons_data = syllabus.get("lessons", [])
 
-    from app.tasks.scheduler import get_scheduler
     from app.tasks.lesson_task import LessonTaskHandler
+    from app.tasks.queue_manager import enqueue
     handler = LessonTaskHandler()
-    scheduler = get_scheduler()
 
     created_ids = []
     prev_lesson_id = None
@@ -219,11 +213,7 @@ async def generate_all_lessons(
     await db.commit()
 
     for lid in created_ids:
-        if scheduler:
-            scheduler.add_job(
-                handler.process_lesson, "date",
-                args=[lid], id=f"lesson_{lid}", replace_existing=True,
-            )
+        await enqueue(lid, handler.process_lesson)
 
     series.status = "generating"
     await db.commit()

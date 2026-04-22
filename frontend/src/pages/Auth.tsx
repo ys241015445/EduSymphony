@@ -8,13 +8,11 @@ import { BookOpen, ArrowLeft } from 'lucide-react'
 
 export default function Auth() {
   const t = useT()
-  const [mode, setMode] = useState<'login' | 'register'>('login')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
   const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const { login, register } = useAuthStore()
+  const { login } = useAuthStore()
   const navigate = useNavigate()
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -22,11 +20,7 @@ export default function Auth() {
     setError('')
     setLoading(true)
     try {
-      if (mode === 'login') {
-        await login(email, password)
-      } else {
-        await register(username, email, password)
-      }
+      await login(username, password)
       navigate('/dashboard')
     } catch (err: any) {
       setError(err.response?.data?.detail || t('auth.error_default'))
@@ -72,10 +66,10 @@ export default function Auth() {
           </div>
 
           <h1 className="text-2xl font-bold text-gray-900 mb-2">
-            {mode === 'login' ? t('auth.welcome_back') : t('auth.create_account')}
+            {t('auth.welcome_back')}
           </h1>
           <p className="text-gray-500 text-sm mb-8">
-            {mode === 'login' ? t('auth.login_subtitle') : t('auth.register_subtitle')}
+            {t('auth.login_subtitle')}
           </p>
 
           {error && (
@@ -85,21 +79,11 @@ export default function Auth() {
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
-            {mode === 'register' && (
-              <Input
-                label={t('auth.username')}
-                placeholder={t('auth.username_placeholder')}
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                required
-              />
-            )}
             <Input
-              label={t('auth.email')}
-              type="email"
-              placeholder={t('auth.email_placeholder')}
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              label={t('auth.username')}
+              placeholder={t('auth.username_placeholder')}
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
               required
             />
             <Input
@@ -111,27 +95,9 @@ export default function Auth() {
               required
             />
             <Button type="submit" disabled={loading} className="w-full" size="lg">
-              {loading ? t('auth.processing') : mode === 'login' ? t('auth.login') : t('auth.register')}
+              {loading ? t('auth.processing') : t('auth.login')}
             </Button>
           </form>
-
-          <div className="mt-6 text-center text-sm text-gray-500">
-            {mode === 'login' ? (
-              <>
-                {t('auth.no_account')}{' '}
-                <button type="button" onClick={() => setMode('register')} className="text-brand-600 hover:underline font-medium">
-                  {t('auth.register_now')}
-                </button>
-              </>
-            ) : (
-              <>
-                {t('auth.has_account')}{' '}
-                <button type="button" onClick={() => setMode('login')} className="text-brand-600 hover:underline font-medium">
-                  {t('auth.go_login')}
-                </button>
-              </>
-            )}
-          </div>
         </div>
       </div>
     </div>

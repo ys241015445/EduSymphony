@@ -14,20 +14,28 @@
 - **多地区适配**：支持澳门/香港繁体中文教案生成（含教青局基本学力要求等本地化结构）
 - **国际化 (i18n)**：前端支持简体中文、繁体中文、英文切换，自动根据地区切换字体与语言
 - **多用户隔离**：JWT 认证，每个用户只能看到和操作自己的教案，Socket.IO 按 lesson room 隔离推送
-- **本地数据存储**：SQLite 数据库 + 本地文件存储，无需外部数据库服务
+- **云端数据库**：Supabase PostgreSQL 托管存储 + 本地文件存储，asyncpg 驱动 + 连接池自适应（直连 / Transaction Pooler 自动切换）
+- **系统公告 Banner**：顶部全站公告，可通过 `BANNER_TEXT` 环境变量一键配置
+- **任务队列 + 并发控制**：内存队列（可 Redis 扩展）+ Semaphore 限流，Socket.IO 实时推送排队位置
+- **课程工具模块**：基于教案/大纲自动生成 PPT、习题、课堂练习，内置四个子工具（Outline / PPT / Exercises / Practice）
 - **灵活重新生成**：支持重新生成初步教案（清除后续讨论）、二次优化教案、重新生成单条专家建议（自动触发全环节重新投票）、重新生成单个教学环节
+- **系列教案**：学期规划 & 下一课自动接续，教师反馈反哺后续教案
 - **多格式导出**：JSON、TXT、Markdown、Word (.docx)、PDF 五种格式导出，支持中文文件名
 - **后台任务不中断**：所有生成任务（教案、教学材料、排版 PDF）均在服务端后台运行，刷新或离开页面不会中断
 
 ## 架构
 
 ```
-EduSymphony_learningplan/
-├── frontend/          React 18 + TypeScript + Vite + TailwindCSS + Zustand
-├── backend/           FastAPI + SQLAlchemy (async) + Socket.IO + APScheduler
-├── backend/database/  本地持久化数据 (SQLite + 上传文件)
-├── docker-compose.yml Docker 一键部署
-└── start.bat          Windows 一键启动
+EduSymphony/
+├── frontend/                   React 18 + TypeScript + Vite + TailwindCSS + Zustand
+├── backend/                    FastAPI + SQLAlchemy 2 (async) + asyncpg + Socket.IO + APScheduler
+│   ├── app/api/                REST 路由（auth / lessons / series / course_tools / system / export）
+│   ├── app/tasks/              队列管理 + AI 任务编排（lesson_task / queue_manager）
+│   └── database/               本地文件存储（上传 / 生成产物，不含数据表）
+├── supabase_schema.sql         Supabase 建表脚本（users / lesson_plans / discussions / 等 7 张表）
+├── supabase_perf_indexes.sql   Supabase 性能优化索引（复合索引 + FK 索引 + ANALYZE）
+├── docker-compose.yml          Docker 一键部署
+└── start.bat                   Windows 一键启动
 ```
 
 **前后端完全分离**：前端通过 HTTP API 和 WebSocket 与后端通信，本地开发用 Vite 代理，Docker 用 Nginx 代理。
@@ -59,21 +67,26 @@ Phase 3: 生成优化教案（整合初步教案 + 各环节专家最佳建议�
 
 ## 快速开始
 
+> **首次部署必须先建表**：在 Supabase Dashboard → SQL Editor 执行 `supabase_schema.sql`，再执行 `supabase_perf_indexes.sql`（性能索引）。
+>
+> 两个脚本都是 `IF NOT EXISTS`，可重复执行。
+
 ### 方式一：Windows 一键启动
 
 ```bash
-# 1. 安装后端环境
+# 1. 安装后端环境（创建 .venv + pip install -r requirements.txt）
 cd backend
 setup.bat
 
-# 2. 编辑 .env 填入各 AI 模型的 API Key
+# 2. 编辑 .env 填入 AI 模型 Key + Supabase 连接串
 notepad backend\.env
 
 # 3. 安装前端环境
-cd frontend
+cd ..\frontend
 setup.bat
 
-# 4. 一键启动前后端
+# 4. 回到根目录一键启动前后端
+cd ..
 start.bat
 ```
 
@@ -111,31 +124,102 @@ cp .env.example .env                 # 编辑填入各 AI 模型的 API Key
 docker compose up -d                 # 宿主机映射：前端 :3002 → 容器 80，后端 :8001 → 容器 8000
 ```
 
-## 环境变量 (.env)
+## 环境变量 (backend/.env)
+
+### AI 模型（至少配置一个）
+
+| 变量 | 说明 |
+|------|------|
+| `QWEN_API_KEY` / `QWEN_MODEL` | 通义千问（默认分配给「教案优化专家」） |
+| `KIMI_API_KEY` / `KIMI_MODEL` | Kimi（默认分配给「学生参与专家」） |
+| `DOUBAO_API_KEY` / `DOUBAO_MODEL` | 豆包（默认分配给「创新教学专家」） |
+| `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` | DeepSeek（默认分配给「深度学习专家」） |
+| `SPARK_API_KEY` / `SPARK_MODEL` | 讯飞星火（默认分配给「认知发展专家」） |
+| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | OpenAI 兼容接口，可选 |
+
+### 数据库与云服务
 
 | 变量 | 说明 | 必填 |
 |------|------|------|
-| `QWEN_API_KEY` | 通义千问 API Key | 至少填一个 |
-| `QWEN_MODEL` | Qwen 模型名（默认 qwen-plus） | 否 |
-| `KIMI_API_KEY` | Kimi（月之暗面）API Key | 至少填一个 |
-| `KIMI_MODEL` | Kimi 模型名 | 否 |
-| `DOUBAO_API_KEY` | 豆包 API Key | 至少填一个 |
-| `DOUBAO_MODEL` | 豆包模型名 | 否 |
-| `DEEPSEEK_API_KEY` | DeepSeek API Key | 至少填一个 |
-| `DEEPSEEK_MODEL` | DeepSeek 模型名 | 否 |
-| `SPARK_API_KEY` | 讯飞星火 API Key | 至少填一个 |
-| `SPARK_MODEL` | 星火模型名 | 否 |
-| `OPENAI_API_KEY` | OpenAI API Key（可选） | 否 |
-| `OPENAI_BASE_URL` | OpenAI 兼容 API 地址 | 否 |
-| `JWT_SECRET` | JWT 签名密钥（生产环境必须更改） | 是 |
+| `DATABASE_URL` | Supabase PostgreSQL 连接串，支持**直连**/ **Session Pooler (5432)** / **Transaction Pooler (6543)** 三种，代码会根据 URL 自动适配 `statement_cache_size` | 是 |
+| `SUPABASE_URL` | Supabase REST API base URL | 否 |
+| `SUPABASE_ANON_KEY` | 匿名密钥（客户端用） | 否 |
+| `SUPABASE_SERVICE_ROLE_KEY` | 服务端密钥（绕过 RLS） | 否 |
 
-> 五个 AI 模型分别分配给五位专家。至少需要配置一个 API Key 才能使用。
+> **生产推荐**使用 Transaction Pooler (端口 6543)：每次 commit 后服务端连接立即归还，最适合长 AI 任务 + 高并发。切换只需改 `DATABASE_URL` 一行，代码无需任何修改。
+
+### 应用配置
+
+| 变量 | 说明 | 默认 |
+|------|------|------|
+| `JWT_SECRET` | JWT 签名密钥（生产环境必须更改） | — |
+| `BANNER_TEXT` | 系统公告文本（留空不显示） | 空 |
+| `MAX_CONCURRENT_TASKS` | 最大并发 AI 任务数 | 5 |
+
+## 预置账号
+
+系统启动时会自动创建以下账号（不开放注册）：
+
+| 用户名 | 密码 |
+|--------|------|
+| lzf | lzf122406 |
+| ys | yellowsea |
+| zhkj | zhkj1234 |
+| zhkj123 | zhkj123 |
+| zhkj456 | zhkj456 |
+
+## 并发、队列与数据库性能
+
+- **Supabase PostgreSQL + Pooler**：默认 10 主池 + 10 溢出；Pooler 模式下扩展到 20 + 30。`pool_recycle=1800s` 自动回收、`pool_pre_ping` 检测僵死连接
+- **服务端硬限制**：`statement_timeout=60s` 防慢查询、`idle_in_transaction_session_timeout=5min` 防空闲事务占连
+- **任务队列**：内存队列管理器（`backend/app/tasks/queue_manager.py`），Semaphore 限制最多 `MAX_CONCURRENT_TASKS`（默认 5）个 AI 任务同时执行，超出自动排队
+- **队列状态推送**：通过 Socket.IO `queue_position` 事件实时推送排队位置
+- **APScheduler**：线程池扩容至 10 workers，`misfire_grace_time=300s`
+- **性能索引**：`supabase_perf_indexes.sql` 新增 10 个复合索引 + FK 专属索引，覆盖 user/status/created_at、lesson/stage、course_tool 等高频查询
+- **游标分页**：`GET /api/v1/lessons?cursor=<ISO 时间>` 性能恒定 O(limit)，替代大 OFFSET 深分页
+- **Docker**：Uvicorn 4 workers，支持 20+ 并发用户
 
 ## 环境要求
 
 - Python 3.11+
 - Node.js 18+
+- 一个 Supabase 项目（免费版即可）
 - 至少配置一个 AI 模型的 API Key
+
+## 数据库
+
+### 建表与索引
+
+1. **表结构**：在 Supabase Dashboard → SQL Editor 执行 `supabase_schema.sql`
+   - 建立 7 张业务表：`users` / `lesson_plans` / `discussions` / `annotations` / `lesson_series` / `course_tool_results` / `teaching_models`
+   - 内置 `teaching_models` 3 条种子数据（5E / BOPPPS / PBL）
+   - `updated_at` 自动更新触发器
+
+2. **性能索引**：再执行 `supabase_perf_indexes.sql`
+   - 10 个复合索引（user+created、user+status+created、lesson+stage+created 等）
+   - FK 专属部分索引（仅索引非 NULL 值）
+   - 活跃状态部分索引（仅队列/处理中）
+   - `ANALYZE` 刷新统计
+
+两个脚本都是 `CREATE ... IF NOT EXISTS`，可**重复执行**，不会报错。
+
+### 查看数据
+
+- **Supabase Dashboard → Table Editor**：可视化浏览/编辑所有表
+- **Supabase Dashboard → SQL Editor**：跑自定义 SQL、看执行计划
+- **Supabase Dashboard → Reports → Query Performance**：慢查询与查询统计
+- **Supabase Dashboard → Logs → Postgres Logs**：实时日志
+- **Supabase Dashboard → Database → Pooler**：连接池监控
+
+### 连接模式切换
+
+代码自动检测 `DATABASE_URL`：
+
+| 模式 | URL 特征 | 说明 |
+|------|---------|------|
+| 直连 | `db.xxx.supabase.co:5432` | 开发/单实例，连接数受 Supabase 项目上限 |
+| Session Pooler | `pooler.supabase.com:5432` | 用户名格式 `postgres.PROJECT_REF`，保留 prepared statements |
+| Transaction Pooler | `pooler.supabase.com:6543` | **生产推荐**，代码自动关闭 `statement_cache_size`，commit 后连接立即归还 |
 
 ## 技术栈
 
@@ -143,24 +227,28 @@ docker compose up -d                 # 宿主机映射：前端 :3002 → 容器
 |------|------|
 | 前端 | React 18, TypeScript, Vite 5, TailwindCSS 3, Zustand, Socket.IO Client, Framer Motion, Lucide Icons |
 | 后端 | FastAPI, SQLAlchemy 2 (async), python-socketio, APScheduler, Pydantic 2 |
-| 数据库 | SQLite (aiosqlite) — 本地文件存储 |
+| 数据库 | Supabase PostgreSQL + asyncpg 驱动，自适应 Transaction Pooler |
 | AI 模型 | Qwen / Kimi / Doubao / DeepSeek / Spark / OpenAI (OpenAI SDK 兼容接口) |
 | 实时通信 | Socket.IO (WebSocket + 长轮询回退) |
 | 认证 | JWT (PyJWT) + PBKDF2 密码哈希 |
-| 导出 | python-docx, xhtml2pdf, pdfplumber |
-| 部署 | Docker Compose (Nginx + Uvicorn) |
+| 导出 | python-docx, python-pptx, xhtml2pdf, pdfplumber |
+| 部署 | Docker Compose (Nginx + Uvicorn 4 workers) |
 
 ## 前端页面
 
 | 页面 | 路径 | 说明 |
 |------|------|------|
 | 首页 | `/` | 产品介绍，登录后显示快速生成入口 |
-| 登录/注册 | `/login` | JWT 认证 |
-| 教案列表 | `/dashboard` | 查看、删除已有教案，快速生成 / 新建教案入口 |
+| 登录 | `/login` | 用户名 + 密码登录（无注册） |
+| 教案列表 | `/dashboard` | 查看、删除已有教案，入口：快速生成 / 新建教案 / 课程工具 / 系列教案 |
 | 创建教案 | `/lesson/new` | 填写教学信息（学科、年级、主题、地区、学生类别、需避免的问题等） |
 | 快速生成 | `/quick-generate` | 输入主题直接生成初步教案，支持预览和多格式下载 |
-| 教案生成过程 | `/lesson/:id/process` | 三栏布局：左侧教学环节状态、中间教案文档（初步/优化/教学材料）、右侧 AI 讨论与投票 |
+| 教案生成过程 | `/lesson/:id/process` | 两栏布局：左侧教学环节状态与教案文档，右侧 AI 专家讨论与投票 |
 | 教案结果 | `/lesson/:id/result` | 查看完整教案，导出多种格式 |
+| 课程工具 | `/course-tools/:lessonId?` | 基于教案/大纲生成 PPT、习题、课堂练习、教学大纲四类内容 |
+| 系列教案 | `/series` | 学期规划 & 批量生成同一课程系列 |
+
+右上角有 **语言切换器** (zh-CN / zh-TW / en)，所有 UI 文案 + AI 生成内容均会跟随切换；顶部有**系统公告 Banner**。
 
 ## API 端点
 
@@ -170,9 +258,15 @@ docker compose up -d                 # 宿主机映射：前端 :3002 → 容器
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/v1/auth/register` | 注册 |
-| POST | `/api/v1/auth/login` | 登录 |
+| POST | `/api/v1/auth/login` | 用户名 + 密码登录 |
 | GET | `/api/v1/auth/me` | 当前用户信息 |
+
+### 系统
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/system/banner` | 获取系统公告 |
+| GET | `/api/v1/system/queue` | 获取任务队列状态 |
 
 ### 教学模型
 
@@ -185,13 +279,37 @@ docker compose up -d                 # 宿主机映射：前端 :3002 → 容器
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/v1/lessons` | 创建教案并触发生成（支持 `mode=quick` 快速模式） |
-| GET | `/api/v1/lessons` | 教案列表 |
+| POST | `/api/v1/lessons` | 创建教案并触发生成（支持 `mode=quick` 快速模式 / `generation_mode=semi_auto`） |
+| GET | `/api/v1/lessons?limit=&offset=&cursor=` | 教案列表，推荐用 `cursor`（ISO 时间戳）分页 |
 | GET | `/api/v1/lessons/:id` | 教案详情（含 final_content） |
 | DELETE | `/api/v1/lessons/:id` | 删除教案 |
 | POST | `/api/v1/lessons/:id/regenerate-draft` | 重新生成初步教案（清除讨论与优化） |
 | POST | `/api/v1/lessons/:id/regenerate-optimized` | 二次优化教案 |
 | POST | `/api/v1/lessons/:id/stages/:key/regenerate` | 重新生成单个教学环节 |
+| POST | `/api/v1/lessons/:id/confirm-step` | 半自动模式：确认当前步骤继续下一阶段 |
+| POST | `/api/v1/lessons/:id/feedback` | 提交教师反馈（供下一课使用） |
+| POST | `/api/v1/lessons/:id/next-lesson` | 基于当前教案生成下一课教案 |
+
+### 系列教案
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/v1/series` | 创建学期课程系列 |
+| GET | `/api/v1/series` | 列出全部系列 |
+| GET | `/api/v1/series/:id` | 系列详情（含大纲） |
+| POST | `/api/v1/series/:id/generate-syllabus` | 触发 AI 生成学期大纲 |
+| POST | `/api/v1/series/:id/batch-generate` | 按大纲批量生成教案 |
+
+### 课程工具
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/v1/course-tools/outline` | 生成课程大纲（学期 / 单课时） |
+| POST | `/api/v1/course-tools/ppt` | 生成 PPT（Doubao + python-pptx） |
+| POST | `/api/v1/course-tools/exercises` | 生成习题 / 日常作业 |
+| POST | `/api/v1/course-tools/practice` | 生成课堂练习 / 实操 |
+| GET | `/api/v1/course-tools/history` | 历史记录列表 |
+| GET | `/api/v1/course-tools/:id/download` | 下载生成文件 |
 
 ### 讨论
 
@@ -235,6 +353,7 @@ docker compose up -d                 # 宿主机映射：前端 :3002 → 容器
 | `votes_saved` | 服务端→客户端 | 投票详情已保存至数据库 |
 | `lesson_completed` | 服务端→客户端 | 教案生成全部完成 |
 | `bg_task_complete` | 服务端→客户端 | 后台任务完成（教学材料 / 排版 PDF） |
+| `queue_position` | 服务端→客户端 | 任务排队位置更新（position, status, running, queued） |
 
 ## AI 专家角色
 
