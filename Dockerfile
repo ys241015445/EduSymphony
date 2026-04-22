@@ -37,10 +37,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app/backend
 
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
-    pip config set install.trusted-host mirrors.aliyun.com
+    pip config set install.trusted-host mirrors.aliyun.com && \
+    pip config set global.timeout 120 && \
+    pip config set global.retries 5
 
 COPY backend/requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# 带 fallback：阿里云镜像偶发抽风时自动切换到官方 PyPI
+RUN pip install --no-cache-dir -r requirements.txt \
+      || pip install --no-cache-dir \
+           --index-url https://pypi.org/simple/ \
+           --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple/ \
+           -r requirements.txt && \
+    python -c "import asyncpg, sqlalchemy, fastapi, socketio; \
+print('deps OK: asyncpg', asyncpg.__version__, \
+'| sqlalchemy', sqlalchemy.__version__, \
+'| fastapi', fastapi.__version__)"
 
 COPY backend/ ./
 RUN mkdir -p /app/backend/database /app/backend/database/files

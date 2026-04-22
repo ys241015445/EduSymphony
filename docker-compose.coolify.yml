@@ -1,7 +1,8 @@
 version: "3.8"
 
-# EduSymphony - Coolify 部署
-# 单容器 (前端+后端+Nginx)，无外部数据库依赖
+# EduSymphony - Coolify 生产部署
+# 单容器（前端 + 后端 + Nginx 内置反代 + Supervisor）
+# 数据库用外部 Supabase PostgreSQL，本容器只需文件存储卷
 
 services:
   app:
@@ -12,14 +13,23 @@ services:
       - "80:80"
     env_file:
       - .env
+    environment:
+      # 后端内部 asyncio 任务并发上限（>20 并发用户建议 8~10）
+      MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-8}
     volumes:
+      # 仅持久化生成的文件（docx/pptx），数据库由 Supabase 托管
       - app_data:/app/backend/database
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost/health"]
       interval: 30s
       timeout: 10s
-      start_period: 40s
+      start_period: 60s
       retries: 3
 
 volumes:

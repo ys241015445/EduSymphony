@@ -1,14 +1,25 @@
 version: "3.8"
 
+# EduSymphony 本地/开发双容器部署
+# 生产环境请使用 docker-compose.coolify.yml（单容器 + Nginx）
+
 services:
   backend:
     build: ./backend
-    ports:
-      - "8001:8000"
-    volumes:
-      - ./backend/database:/app/database
+    # 默认不对外暴露后端端口，只在内网供 frontend/nginx 反代
+    # 如需直接访问 FastAPI docs，取消下面注释
+    # ports:
+    #   - "8001:8000"
+    expose:
+      - "8000"
     env_file:
       - .env
+    environment:
+      # 关键：内存队列需要单 worker，这里通过环境变量提醒
+      # 实际 workers 数由 Dockerfile CMD 控制（固定为 1）
+      MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-5}
+    volumes:
+      - ./backend/database:/app/database
     restart: unless-stopped
     deploy:
       resources:
