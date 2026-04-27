@@ -147,21 +147,43 @@ CREATE INDEX IF NOT EXISTS idx_annotations_lesson ON annotations (lesson_plan_id
 
 -- ============================================================
 -- 7. course_tool_results — 课程工具生成记录（大纲/PPT/习题/练习）
+--    支持异步队列：pending / running / completed / failed
 -- ============================================================
 CREATE TABLE IF NOT EXISTS course_tool_results (
-    id          VARCHAR(36)  PRIMARY KEY DEFAULT uuid_generate_v4()::text,
-    user_id     VARCHAR(36)  NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    lesson_id   VARCHAR(36)  REFERENCES lesson_plans(id) ON DELETE SET NULL,
-    tool_type   VARCHAR(20)  NOT NULL,                   -- outline / ppt / exercises / practice
-    params      JSONB        DEFAULT '{}',
-    result      JSONB        DEFAULT '{}',
-    file_path   TEXT,
-    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+    id             VARCHAR(36)  PRIMARY KEY DEFAULT uuid_generate_v4()::text,
+    user_id        VARCHAR(36)  NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    lesson_id      VARCHAR(36)  REFERENCES lesson_plans(id) ON DELETE SET NULL,
+    tool_type      VARCHAR(20)  NOT NULL,                   -- outline / ppt / exercises / practice
+    params         JSONB        DEFAULT '{}',
+    result         JSONB        DEFAULT '{}',
+    file_path      TEXT,
+    status         TEXT         NOT NULL DEFAULT 'completed',  -- pending / running / completed / failed
+    error_message  TEXT,
+    created_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_course_tool_user    ON course_tool_results (user_id);
 CREATE INDEX IF NOT EXISTS idx_course_tool_lesson  ON course_tool_results (lesson_id);
 CREATE INDEX IF NOT EXISTS idx_course_tool_type    ON course_tool_results (tool_type);
+CREATE INDEX IF NOT EXISTS idx_ctr_user_status_created
+    ON course_tool_results (user_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ctr_user_tool_type_created
+    ON course_tool_results (user_id, tool_type, created_at DESC);
+
+-- 每次 UPDATE 自动刷新 updated_at
+CREATE OR REPLACE FUNCTION _trg_ctr_touch_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS ctr_touch_updated_at ON course_tool_results;
+CREATE TRIGGER ctr_touch_updated_at
+    BEFORE UPDATE ON course_tool_results
+    FOR EACH ROW EXECUTE FUNCTION _trg_ctr_touch_updated_at();
 
 -- ============================================================
 -- 8. 预置种子数据 — 5 个初始账号

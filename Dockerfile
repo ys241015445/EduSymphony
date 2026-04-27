@@ -16,7 +16,9 @@ COPY frontend/ ./
 RUN npm run build
 
 # ---------- 阶段2: 运行时 ----------
-FROM python:3.11-slim
+# 固定 -bookworm（Debian 12）：避免滚动 tag 跳到 trixie 后与下方阿里云
+# bookworm sources.list 不一致而回落到 deb.debian.org（国内连接极不稳定）
+FROM python:3.11-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -40,6 +42,14 @@ RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
     pip config set install.trusted-host mirrors.aliyun.com && \
     pip config set global.timeout 120 && \
     pip config set global.retries 5
+
+# 绝对保险层：先把 Postgres 异步驱动装上，就算 requirements.txt 漏写也能跑
+# 如果这一步失败会立即阻断构建，不会像以前那样到运行期才崩
+RUN pip install --no-cache-dir "asyncpg==0.30.0" "sqlalchemy[asyncio]==2.0.25" \
+      || pip install --no-cache-dir \
+           --index-url https://pypi.org/simple/ \
+           --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple/ \
+           "asyncpg==0.30.0" "sqlalchemy[asyncio]==2.0.25"
 
 COPY backend/requirements.txt ./
 # 带 fallback：阿里云镜像偶发抽风时自动切换到官方 PyPI
@@ -148,7 +158,9 @@ stderr_logfile_maxbytes=0
 priority=10
 
 [program:backend]
-command=uvicorn app.main:application --host 0.0.0.0 --port 8000 --workers 1
+# 注：app.main 中 application = socket_app（别名），两者等价；
+# 此处统一使用 socket_app，与 backend/Dockerfile 及 README 保持一致
+command=uvicorn app.main:socket_app --host 0.0.0.0 --port 8000 --workers 1
 directory=/app/backend
 autorestart=true
 stdout_logfile=/dev/stdout

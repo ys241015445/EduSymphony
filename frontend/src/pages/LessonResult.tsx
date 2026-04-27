@@ -23,23 +23,29 @@ export default function LessonResult() {
     if (id) fetchLesson(id)
   }, [id, fetchLesson])
 
+  // 仅在教案 id 变化（即载入一份新教案）时初始化默认 viewMode，
+  // 避免用户在 stages 视图里点章节时被重置回 optimized 视图。
   useEffect(() => {
-    if (currentLesson?.final_content) {
-      const fc = currentLesson.final_content
-      if (fc.full_optimized) {
-        setViewMode('optimized')
-      } else if (fc.full_draft) {
-        setViewMode('draft')
-      } else {
-        setViewMode('stages')
-      }
-
-      if (fc.stages) {
-        const keys = Object.keys(fc.stages)
-        if (keys.length > 0 && !activeStage) setActiveStage(keys[0])
-      }
+    const fc = currentLesson?.final_content
+    if (!fc) return
+    if (fc.full_optimized) {
+      setViewMode('optimized')
+    } else if (fc.full_draft) {
+      setViewMode('draft')
+    } else {
+      setViewMode('stages')
     }
-  }, [currentLesson, activeStage])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentLesson?.id])
+
+  // 同理：仅在换到新教案时选中第一个章节，后续用户点哪个章节就显示哪个
+  useEffect(() => {
+    const fc = currentLesson?.final_content
+    if (!fc?.stages) return
+    const keys = Object.keys(fc.stages)
+    if (keys.length > 0) setActiveStage(keys[0])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentLesson?.id])
 
   if (!currentLesson) {
     return (

@@ -4,6 +4,7 @@ import { useAuthStore } from '../../stores/authStore'
 import { useLanguageStore, Locale } from '../../stores/languageStore'
 import { useT } from '../../i18n/translations'
 import Button from '../ui/Button'
+import JobsBadge from './JobsBadge'
 import { BookOpen, LogOut, LayoutDashboard, Globe } from 'lucide-react'
 
 const LOCALE_OPTIONS: { value: Locale; key: string }[] = [
@@ -75,6 +76,7 @@ export default function Header() {
 
           {token && user ? (
             <>
+              <JobsBadge />
               <Link to="/dashboard">
                 <Button variant="ghost" size="sm">
                   <LayoutDashboard className="w-4 h-4 mr-1.5" />

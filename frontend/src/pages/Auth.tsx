@@ -98,6 +98,9 @@ export default function Auth() {
               {loading ? t('auth.processing') : t('auth.login')}
             </Button>
           </form>
+          <p className="mt-6 text-xs text-gray-400 text-center">
+            {t('auth.contact_admin')}
+          </p>
         </div>
       </div>
     </div>

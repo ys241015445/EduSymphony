@@ -1,8 +1,7 @@
-version: "3.8"
-
 # EduSymphony - Coolify 生产部署
 # 单容器（前端 + 后端 + Nginx 内置反代 + Supervisor）
 # 数据库用外部 Supabase PostgreSQL，本容器只需文件存储卷
+# 注：Compose v2 已废弃顶层 `version` 字段，此处不再声明
 
 services:
   app:
@@ -14,8 +13,30 @@ services:
     env_file:
       - .env
     environment:
-      # 后端内部 asyncio 任务并发上限（>20 并发用户建议 8~10）
-      MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-8}
+      # ── ⚠️ DEPRECATED：方舟 PPT 智能体 / Coze Bot 已从 _do_ppt 移除 ──
+      # PPT 现在走「本地两阶段豆包深度生成 + python-pptx 渲染」，
+      # 只依赖 DOUBAO_API_KEY + DOUBAO_MODEL，下面这几行不会被代码读取，
+      # 保留仅为兼容老 .env，整段删除也完全没问题。
+      DOUBAO_PPT_BOT_ID:         ${DOUBAO_PPT_BOT_ID:-}
+      DOUBAO_PPT_BOT_TIMEOUT:    ${DOUBAO_PPT_BOT_TIMEOUT:-180}
+      COZE_API_KEY:              ${COZE_API_KEY:-}
+      COZE_BOT_ID:               ${COZE_BOT_ID:-}
+      COZE_BASE_URL:             ${COZE_BASE_URL:-https://api.coze.cn}
+      COZE_PPT_TIMEOUT:          ${COZE_PPT_TIMEOUT:-300}
+      COZE_POLL_INTERVAL:        ${COZE_POLL_INTERVAL:-2.0}
+      # ── Postgres-backed 持久化队列 ──
+      MAX_CONCURRENT_TASKS:      ${MAX_CONCURRENT_TASKS:-8}
+      MAX_PER_USER_TASKS:        ${MAX_PER_USER_TASKS:-3}
+      TASK_TIMEOUT_SEC:          ${TASK_TIMEOUT_SEC:-1200}
+      WORKER_LEASE_SEC:          ${WORKER_LEASE_SEC:-1800}
+      QUEUE_POLL_INTERVAL_MS:    ${QUEUE_POLL_INTERVAL_MS:-1000}
+      QUEUE_SWEEP_INTERVAL_SEC:  ${QUEUE_SWEEP_INTERVAL_SEC:-30}
+      QUEUE_GC_DAYS:             ${QUEUE_GC_DAYS:-7}
+      # ── 数据库连接池 ──（留空使用代码自适应默认：max(15, workers*2+5)）
+      # DB_POOL_SIZE:             ${DB_POOL_SIZE:-}
+      # DB_MAX_OVERFLOW:          ${DB_MAX_OVERFLOW:-}
+      DB_STATEMENT_TIMEOUT_MS:   ${DB_STATEMENT_TIMEOUT_MS:-120000}
+      DB_COMMAND_TIMEOUT_SEC:    ${DB_COMMAND_TIMEOUT_SEC:-180}
     volumes:
       # 仅持久化生成的文件（docx/pptx），数据库由 Supabase 托管
       - app_data:/app/backend/database

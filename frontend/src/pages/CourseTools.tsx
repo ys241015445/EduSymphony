@@ -1,13 +1,17 @@
 import { useState, useEffect } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, useSearchParams, Link } from 'react-router-dom'
 import Header from '../components/layout/Header'
 import { useT } from '../i18n/translations'
 import { api } from '../services/api'
 import Button from '../components/ui/Button'
 import Input from '../components/ui/Input'
+import SourcePicker, { SourceRef, applySourceToFormData } from '../components/course/SourcePicker'
+import { useJobsStore } from '../stores/jobsStore'
+import { toast } from '../components/ui/Toast'
+import { getSocket } from '../services/socket'
 import {
   FileText, Presentation, ClipboardList, FlaskConical,
-  Download, Loader2, ChevronLeft, Sparkles, Merge, BookOpen, Palette, RefreshCw, Check,
+  Download, Loader2, Sparkles, Merge, Palette, RefreshCw, Check,
 } from 'lucide-react'
 
 type Tab = 'outline' | 'ppt' | 'exercises' | 'practice'
@@ -37,11 +41,24 @@ const PALETTE_ORDER: (keyof PaletteShape)[] = ['bg', 'section_bg', 'accent', 'ti
 
 export default function CourseTools() {
   const { lessonId } = useParams<{ lessonId: string }>()
+  const [searchParams, setSearchParams] = useSearchParams()
   const t = useT()
-  const [tab, setTab] = useState<Tab>('outline')
+  const urlTab = (searchParams.get('tab') as Tab) || 'outline'
+  const urlResultId = searchParams.get('result_id') || ''
+  const [tab, _setTab] = useState<Tab>(urlTab)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [history, setHistory] = useState<HistoryItem[]>([])
+  const addJob = useJobsStore((s) => s.add)
+  const bindSocket = useJobsStore((s) => s.bindSocket)
+
+  // keep URL in sync when tab changes
+  const setTab = (next: Tab) => {
+    _setTab(next)
+    const sp = new URLSearchParams(searchParams)
+    sp.set('tab', next)
+    setSearchParams(sp, { replace: true })
+  }
 
   // shared fields
   const [subject, setSubject] = useState('')
@@ -49,6 +66,11 @@ export default function CourseTools() {
   const [region, setRegion] = useState('mainland')
   const [topic, setTopic] = useState('')
   const [content, setContent] = useState('')
+
+  // unified source: lesson / series / outline
+  const [source, setSource] = useState<SourceRef | null>(
+    lessonId ? { kind: 'lesson', id: lessonId, title: lessonId, mode: 'auto' } : null
+  )
 
   // outline
   const [scope, setScope] = useState<'semester' | 'single_lesson'>('single_lesson')
@@ -64,21 +86,29 @@ export default function CourseTools() {
   const [selectedStyle, setSelectedStyle] = useState<StyleCandidate | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
 
-  // Reset candidates when key fields change so a stale palette isn't accidentally used
+  // Reset candidates + clear stale error banner when key fields change.
+  // 避免上一次失败/中途断网留下的红条一直挂着，让用户误以为"风格分析失败"。
   useEffect(() => {
     if (styleCandidates.length || selectedStyle) {
       setStyleCandidates([])
       setSelectedStyle(null)
     }
+    if (error) setError('')
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [topic, subject, gradeLevel, styleTags.join(','), styleDesc])
+  }, [topic, subject, gradeLevel, styleTags.join(','), styleDesc, source])
+
+  // Switching tabs should clear stale error banners as well.
+  useEffect(() => {
+    if (error) setError('')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab])
 
   const toggleTag = (tag: string) => {
     setStyleTags(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag])
   }
 
   const analyzeStyle = async () => {
-    if (!topic && !subject) {
+    if (!topic && !subject && !source) {
       setError(t('tools.need_topic_or_subject'))
       return
     }
@@ -92,13 +122,32 @@ export default function CourseTools() {
       fd.append('topic', topic)
       fd.append('style_tags', styleTags.join(','))
       fd.append('style_description', styleDesc)
-      if (lessonId) fd.append('lesson_id', lessonId)
+      applySourceToFormData(fd, source)
       const res = await api.post('/api/v1/course-tools/ppt/analyze-style', fd)
-      const list: StyleCandidate[] = res.data.candidates || []
+      const raw = Array.isArray(res?.data?.candidates) ? res.data.candidates : []
+      const list: StyleCandidate[] = raw
+        .filter((c: any) => c && c.palette)
+        .map((c: any) => ({
+          name: String(c.name || '候选方案'),
+          mood: String(c.mood || ''),
+          rationale: String(c.rationale || ''),
+          palette: c.palette,
+        }))
+      if (!list.length) {
+        // 200 OK 但 AI 没给合法候选 —— 让用户看到"AI 没返回"，而不是无声失败
+        setError(t('tools.analysis_no_palette') || 'AI 没返回合法的配色方案，请重试')
+        return
+      }
       setStyleCandidates(list)
-      setSelectedStyle(list[0] || null)
+      setSelectedStyle(list[0])
     } catch (e: any) {
-      setError(e.response?.data?.detail || t('tools.analyze_failed'))
+      const detail = e?.response?.data?.detail
+      const msg = typeof detail === 'string' && detail
+        ? detail
+        : (e?.message || t('tools.analyze_failed'))
+      // eslint-disable-next-line no-console
+      console.warn('[analyzeStyle] failed:', e)
+      setError(msg)
     } finally {
       setAnalyzing(false)
     }
@@ -117,10 +166,67 @@ export default function CourseTools() {
   const [practiceId, setPracticeId] = useState('')
 
   useEffect(() => {
-    api.get('/api/v1/course-tools/history', { params: { lesson_id: lessonId || undefined } })
+    const lid = source?.kind === 'lesson' ? source.id : lessonId
+    api.get('/api/v1/course-tools/history', { params: { lesson_id: lid || undefined } })
       .then(r => setHistory(r.data))
       .catch(() => {})
-  }, [lessonId, outlineId, pptId, exId, practiceId])
+  }, [lessonId, source, outlineId, pptId, exId, practiceId])
+
+  // Hydrate an existing result when URL carries ?result_id=
+  useEffect(() => {
+    if (!urlResultId) return
+    api.get(`/api/v1/course-tools/results/${urlResultId}`)
+      .then(r => {
+        const d = r.data
+        const type = d.tool_type as Tab
+        _setTab(type)
+        if (d.status !== 'completed') {
+          // nothing to populate yet; socket will fill later
+          return
+        }
+        switch (type) {
+          case 'outline':
+            setOutlineResult(d.result); setOutlineId(d.id); break
+          case 'ppt':
+            setPptResult(d.result); setPptId(d.id); break
+          case 'exercises':
+            setExResult(d.result); setExId(d.id); break
+          case 'practice':
+            setPracticeResult(d.result); setPracticeId(d.id); break
+        }
+      })
+      .catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlResultId])
+
+  // Listen for socket completion events that match our pending result_ids
+  useEffect(() => {
+    bindSocket()
+    const s = getSocket()
+    const onDone = async (payload: any) => {
+      const rid = payload?.result_id
+      if (!rid) return
+      try {
+        const r = await api.get(`/api/v1/course-tools/results/${rid}`)
+        const d = r.data
+        const type = d.tool_type as Tab
+        // Only populate into visible tab if the tab matches
+        switch (type) {
+          case 'outline':
+            if (outlineId === rid || !outlineId) { setOutlineResult(d.result); setOutlineId(d.id) } break
+          case 'ppt':
+            if (pptId === rid || !pptId) { setPptResult(d.result); setPptId(d.id) } break
+          case 'exercises':
+            if (exId === rid || !exId) { setExResult(d.result); setExId(d.id) } break
+          case 'practice':
+            if (practiceId === rid || !practiceId) { setPracticeResult(d.result); setPracticeId(d.id) } break
+        }
+      } catch {}
+    }
+    s.on('course_tool_completed', onDone)
+    return () => { s.off('course_tool_completed', onDone) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [outlineId, pptId, exId, practiceId])
 
   const formData = (extra: Record<string, any>) => {
     const fd = new FormData()
@@ -129,19 +235,44 @@ export default function CourseTools() {
     fd.append('region', region)
     fd.append('topic', topic)
     fd.append('content', content)
-    if (lessonId) fd.append('lesson_id', lessonId)
-    Object.entries(extra).forEach(([k, v]) => fd.append(k, String(v)))
+    applySourceToFormData(fd, source)
+    Object.entries(extra).forEach(([k, v]) => {
+      if (v === '' || v === null || v === undefined) return
+      fd.append(k, String(v))
+    })
     return fd
   }
 
-  const generate = async (endpoint: string, extra: Record<string, any>, onSuccess: (d: any) => void) => {
+  const generate = async (
+    endpoint: string,
+    extra: Record<string, any>,
+    _onSuccess: (d: any) => void,
+  ) => {
     setLoading(true)
     setError('')
     try {
       const res = await api.post(`/api/v1/course-tools/${endpoint}`, formData(extra))
-      onSuccess(res.data)
+      const d = res.data
+      const toolType = (d.tool_type as 'outline' | 'ppt' | 'exercises' | 'practice') ||
+        ((['outline', 'ppt', 'exercises', 'practice'] as const).find(x => endpoint.startsWith(x))) ||
+        'outline'
+      // remember pending result id in the same slot so socket completion can fill it later
+      switch (toolType) {
+        case 'outline': setOutlineId(d.result_id || d.id); break
+        case 'ppt': setPptId(d.result_id || d.id); break
+        case 'exercises': setExId(d.result_id || d.id); break
+        case 'practice': setPracticeId(d.result_id || d.id); break
+      }
+      addJob({
+        result_id: d.result_id || d.id,
+        tool_type: toolType,
+        title: d.title || '',
+        status: (d.status as any) || 'queued',
+      })
+      toast.info(t('tools.job_enqueued'))
     } catch (e: any) {
       setError(e.response?.data?.detail || t('tools.gen_failed'))
+      toast.error(e.response?.data?.detail || t('tools.gen_failed'))
     } finally {
       setLoading(false)
     }
@@ -187,16 +318,8 @@ export default function CourseTools() {
         <div className="flex gap-6">
           {/* ── Left panel ── */}
           <div className="w-72 flex-shrink-0 space-y-4">
-            {/* Lesson info card */}
-            {lessonId && (
-              <div className="bg-white rounded-xl border p-4">
-                <div className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                  <BookOpen className="w-4 h-4 text-brand-600" />
-                  {t('tools.linked_lesson')}
-                </div>
-                <p className="text-xs text-gray-500 truncate">{lessonId}</p>
-              </div>
-            )}
+            {/* Unified source picker */}
+            <SourcePicker value={source} onChange={setSource} />
 
             {/* Quick input */}
             <div className="bg-white rounded-xl border p-4 space-y-3">
@@ -221,7 +344,11 @@ export default function CourseTools() {
                 {history.map(h => (
                   <div key={h.id} className="flex items-center gap-2 text-xs p-2 rounded-lg hover:bg-gray-50 cursor-pointer"
                     onClick={() => {
-                      setTab(h.tool_type as Tab)
+                      _setTab(h.tool_type as Tab)
+                      const sp = new URLSearchParams(searchParams)
+                      sp.set('tab', h.tool_type)
+                      sp.set('result_id', h.id)
+                      setSearchParams(sp, { replace: true })
                     }}>
                     <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
                       h.tool_type === 'outline' ? 'bg-blue-500' :
@@ -255,7 +382,17 @@ export default function CourseTools() {
             </div>
 
             {error && (
-              <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600">{error}</div>
+              <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600 flex items-start gap-2">
+                <span className="flex-1">{error}</span>
+                <button
+                  type="button"
+                  className="text-red-400 hover:text-red-600 font-semibold leading-none px-1"
+                  onClick={() => setError('')}
+                  aria-label="dismiss"
+                >
+                  ×
+                </button>
+              </div>
             )}
 
             {/* ── Outline Tab ── */}
@@ -488,9 +625,9 @@ export default function CourseTools() {
                   <div className="mt-4 space-y-3">
                     <h3 className="font-medium text-gray-800">{exResult.title}</h3>
                     <div className="space-y-3 max-h-96 overflow-y-auto">
-                      {(exResult.exercises || []).map((ex: any) => (
-                        <div key={ex.id} className="border rounded-lg p-3">
-                          <div className="text-sm font-medium text-gray-800">{ex.id}. {ex.question}</div>
+                      {(exResult.exercises || []).map((ex: any, i: number) => (
+                        <div key={`ex-${i}-${ex.id ?? ''}`} className="border rounded-lg p-3">
+                          <div className="text-sm font-medium text-gray-800">{ex.id ?? i + 1}. {ex.question}</div>
                           {ex.options?.map((opt: string, j: number) => (
                             <div key={j} className="text-xs text-gray-600 mt-1 pl-3">{opt}</div>
                           ))}
@@ -541,8 +678,8 @@ export default function CourseTools() {
                       </div>
                     )}
                     <div className="space-y-3 max-h-80 overflow-y-auto">
-                      {(practiceResult.practices || []).map((p: any) => (
-                        <div key={p.id} className="border rounded-lg p-3">
+                      {(practiceResult.practices || []).map((p: any, i: number) => (
+                        <div key={`pr-${i}-${p.id ?? ''}`} className="border rounded-lg p-3">
                           <div className="flex items-center gap-2">
                             <span className={`text-xs px-2 py-0.5 rounded-full ${
                               p.type === 'hands_on' ? 'bg-orange-100 text-orange-700' :
@@ -570,7 +707,7 @@ export default function CourseTools() {
                             const res = await api.post(`/api/v1/course-tools/practice/${practiceId}/merge-ppt`, fd)
                             setPptId(res.data.id)
                             setError('')
-                            alert(t('tools.merge_success'))
+                            toast.success(t('tools.merge_success'))
                           } catch (e: any) {
                             setError(e.response?.data?.detail || t('tools.merge_failed'))
                           } finally {

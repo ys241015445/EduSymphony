@@ -91,13 +91,13 @@ async def create_lesson(
     await db.commit()
     await db.refresh(lesson)
 
-    from app.tasks.lesson_task import LessonTaskHandler
     from app.tasks.queue_manager import enqueue
-    handler = LessonTaskHandler()
-
     is_quick = mode == "quick"
-    task_fn = handler.process_lesson_quick if is_quick else handler.process_lesson
-    await enqueue(lesson.id, task_fn)
+    await enqueue(
+        lesson.id,
+        user_id=str(current_user.id),
+        kind="lesson_quick" if is_quick else "lesson",
+    )
     logger.info(f"Enqueued {'quick' if is_quick else 'full'} lesson job for {lesson.id}")
 
     return LessonResponse.model_validate(lesson)
@@ -243,10 +243,8 @@ async def regenerate_draft(
     if not owner_check.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="教案不存在")
 
-    from app.tasks.lesson_task import LessonTaskHandler
     from app.tasks.queue_manager import enqueue
-    handler = LessonTaskHandler()
-    await enqueue(lesson_id, handler.regenerate_full_process)
+    await enqueue(lesson_id, user_id=str(current_user.id), kind="regenerate_full")
     return {"status": "ok", "message": "初步教案重新生成已启动"}
 
 
@@ -263,10 +261,8 @@ async def regenerate_optimized_endpoint(
     if not owner_check.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="教案不存在")
 
-    from app.tasks.lesson_task import LessonTaskHandler
     from app.tasks.queue_manager import enqueue
-    handler = LessonTaskHandler()
-    await enqueue(lesson_id, handler.regenerate_optimized)
+    await enqueue(lesson_id, user_id=str(current_user.id), kind="regenerate_optimized")
     return {"status": "ok", "message": "二次优化已启动"}
 
 
@@ -410,21 +406,10 @@ async def confirm_step(
     lesson.status = LessonStatus.PROCESSING.value
     await db.commit()
 
-    from app.tasks.lesson_task import LessonTaskHandler
+    # 所有 phase 分支都落到 kind="continue"，由 job_handlers._continue_dispatcher
+    # 根据 DB 里的 current_phase 路由到对应 continue_xxx 方法。
     from app.tasks.queue_manager import enqueue
-    handler = LessonTaskHandler()
-    current_phase = lesson.current_phase or ""
-
-    if current_phase == "model_recommendation_done":
-        task_fn = handler.continue_after_model_recommendation
-    elif current_phase == "draft_done":
-        task_fn = handler.continue_after_draft
-    elif current_phase.startswith("stage_"):
-        task_fn = handler.continue_after_stage
-    else:
-        task_fn = handler.continue_after_model_recommendation
-
-    await enqueue(lesson_id, task_fn)
+    await enqueue(lesson_id, user_id=str(current_user.id), kind="continue")
     return {"status": "ok", "message": "已确认，继续生成"}
 
 
@@ -497,9 +482,7 @@ async def generate_next_lesson(
     await db.commit()
     await db.refresh(new_lesson)
 
-    from app.tasks.lesson_task import LessonTaskHandler
     from app.tasks.queue_manager import enqueue
-    handler = LessonTaskHandler()
-    await enqueue(new_lesson.id, handler.process_lesson)
+    await enqueue(new_lesson.id, user_id=str(current_user.id), kind="lesson_copy")
 
     return LessonResponse.model_validate(new_lesson)

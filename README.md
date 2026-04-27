@@ -16,26 +16,38 @@
 - **多用户隔离**：JWT 认证，每个用户只能看到和操作自己的教案，Socket.IO 按 lesson room 隔离推送
 - **云端数据库**：Supabase PostgreSQL 托管存储 + 本地文件存储，asyncpg 驱动 + 连接池自适应（直连 / Transaction Pooler 自动切换）
 - **系统公告 Banner**：顶部全站公告，可通过 `BANNER_TEXT` 环境变量一键配置
-- **任务队列 + 并发控制**：内存队列（可 Redis 扩展）+ Semaphore 限流，Socket.IO 实时推送排队位置
-- **课程工具模块**：基于教案/大纲自动生成 PPT、习题、课堂练习，内置四个子工具（Outline / PPT / Exercises / Practice）
+- **Postgres 持久化任务队列**：队列落盘至 `queue_jobs` 表（`SELECT FOR UPDATE SKIP LOCKED`），支持重启恢复、多实例横向扩展、单用户并发上限、lease/sweeper 自动回收超时任务，Socket.IO 实时推送排队位置
+- **课程工具模块**：基于教案/大纲自动生成 PPT、习题、课堂练习，内置四个子工具（Outline / PPT / Exercises / Practice）。其中 PPT 走**本地两阶段豆包深度生成**：先生成 15-25 页结构化大纲，再以 8 并发为每页生成富文本 bullets + 主讲稿，最后由 `python-pptx` 用 12 种内置版式渲染（不依赖任何第三方 PPT 插件，完全可控）
+- **大学年级专用页**：`/university` 专门面向大学教案，支持 1 节课 / 几周 / 一学期批量生成（Qwen）+ 可选课上练习/习题生成（DeepSeek），支持合并导出、按周打包 ZIP 导出
+- **模板 AI 填写**：`/template-fill` 独立辅助工具 —— 上传 docx / pptx / xlsx / txt / md 模板 + 描述要生成的内容，Qwen 识别占位符（显式 `{{xxx}}` / `____` / `<xxx>` / `【xxx】` / `《xxx》`，否则 AI 自动识别），保留原排版填入，支持跨格式导出
 - **灵活重新生成**：支持重新生成初步教案（清除后续讨论）、二次优化教案、重新生成单条专家建议（自动触发全环节重新投票）、重新生成单个教学环节
 - **系列教案**：学期规划 & 下一课自动接续，教师反馈反哺后续教案
-- **多格式导出**：JSON、TXT、Markdown、Word (.docx)、PDF 五种格式导出，支持中文文件名
-- **后台任务不中断**：所有生成任务（教案、教学材料、排版 PDF）均在服务端后台运行，刷新或离开页面不会中断
+- **多格式导出**：JSON、TXT、Markdown、Word (.docx)、Excel (.xlsx)、PDF 等格式导出，支持中文文件名、合并导出与 ZIP 打包
+- **后台任务不中断**：所有生成任务（教案、教学材料、排版 PDF、模板填写）均在服务端后台运行，刷新或离开页面不会中断
 
 ## 架构
 
 ```
 EduSymphony/
-├── frontend/                   React 18 + TypeScript + Vite + TailwindCSS + Zustand
-├── backend/                    FastAPI + SQLAlchemy 2 (async) + asyncpg + Socket.IO + APScheduler
-│   ├── app/api/                REST 路由（auth / lessons / series / course_tools / system / export）
-│   ├── app/tasks/              队列管理 + AI 任务编排（lesson_task / queue_manager）
-│   └── database/               本地文件存储（上传 / 生成产物，不含数据表）
-├── supabase_schema.sql         Supabase 建表脚本（users / lesson_plans / discussions / 等 7 张表）
-├── supabase_perf_indexes.sql   Supabase 性能优化索引（复合索引 + FK 索引 + ANALYZE）
-├── docker-compose.yml          Docker 一键部署
-└── start.bat                   Windows 一键启动
+├── frontend/                        React 18 + TypeScript + Vite + TailwindCSS + Zustand
+├── backend/                         FastAPI + SQLAlchemy 2 (async) + asyncpg + Socket.IO + APScheduler
+│   ├── app/api/                     REST 路由（auth / lessons / series / course_tools / system / export /
+│   │                                         university / template_fill）
+│   ├── app/tasks/                   队列管理 + AI 任务编排
+│   │   ├── queue_manager.py         Postgres-backed 队列 + worker/sweeper
+│   │   ├── job_handlers.py          kind → handler 注册表
+│   │   └── lesson_task.py           教案多阶段生成流水线
+│   ├── app/services/                AI 服务、PPT、模板填写等
+│   └── database/                    本地文件存储（上传 / 生成产物，不含数据表）
+├── supabase_schema.sql              Supabase 建表脚本（users / lesson_plans / discussions / 等 7 张业务表）
+├── supabase_perf_indexes.sql        Supabase 性能优化索引（复合索引 + FK 索引 + ANALYZE）
+├── supabase_queue_migration.sql     Postgres 持久化队列表 queue_jobs + 索引
+├── supabase_university_migration.sql 大学页专用字段（lesson_series / lesson_plans 扩展列）
+├── docker-compose.yml               本地开发双容器（backend + frontend）
+├── docker-compose.coolify.yml       生产单容器（Nginx + Supervisor）
+├── Dockerfile                       生产单容器 Dockerfile
+├── backend/Dockerfile               后端开发镜像
+└── start.bat                        Windows 一键启动
 ```
 
 **前后端完全分离**：前端通过 HTTP API 和 WebSocket 与后端通信，本地开发用 Vite 代理，Docker 用 Nginx 代理。
@@ -67,9 +79,13 @@ Phase 3: 生成优化教案（整合初步教案 + 各环节专家最佳建议�
 
 ## 快速开始
 
-> **首次部署必须先建表**：在 Supabase Dashboard → SQL Editor 执行 `supabase_schema.sql`，再执行 `supabase_perf_indexes.sql`（性能索引）。
+> **首次部署必须按顺序在 Supabase Dashboard → SQL Editor 执行**以下 SQL 脚本：
+> 1. `supabase_schema.sql` —— 7 张业务表 + 触发器 + 种子数据
+> 2. `supabase_perf_indexes.sql` —— 性能索引
+> 3. `supabase_queue_migration.sql` —— 持久化任务队列 `queue_jobs`
+> 4. `supabase_university_migration.sql` —— 大学页新增字段
 >
-> 两个脚本都是 `IF NOT EXISTS`，可重复执行。
+> 所有脚本都是 `IF NOT EXISTS`，**可重复执行**，升级时重跑即可。
 
 ### 方式一：Windows 一键启动
 
@@ -117,12 +133,27 @@ npm install                          # 首次运行
 npm run dev                          # vite 固定 3000；/api 与 /socket.io 代理到 127.0.0.1:3002
 ```
 
-### 方式三：Docker
+### 方式三：Docker（本地 / 开发）
 
 ```bash
-cp .env.example .env                 # 编辑填入各 AI 模型的 API Key
-docker compose up -d                 # 宿主机映射：前端 :3002 → 容器 80，后端 :8001 → 容器 8000
+cp backend/.env.example .env         # 编辑填入各 AI 模型 Key + Supabase DATABASE_URL
+docker compose up -d                 # 前端 :3002 → 容器 80；后端仅内部暴露 :8000
+docker compose logs -f backend       # 实时查看后端日志
 ```
+
+### 方式四：Coolify / 单容器生产部署
+
+```bash
+# 服务器上（Coolify 可视化也可）
+docker compose -f docker-compose.coolify.yml up -d --build
+# 单容器：Nginx + FastAPI + Supervisor，端口 80
+```
+
+**部署注意**：
+- 必须先在 Supabase 跑完 4 个 SQL 脚本（见上方快速开始）
+- `DATABASE_URL` 推荐 Transaction Pooler (端口 6543) 以获得最佳并发
+- 多实例横向扩容时，`queue_jobs` 表自动在实例间分派任务（`SELECT FOR UPDATE SKIP LOCKED`），无需额外配置
+- Coolify 更新镜像失败时，使用「Force rebuild (no cache)」避免 pip 层缓存
 
 ## 环境变量 (backend/.env)
 
@@ -132,7 +163,9 @@ docker compose up -d                 # 宿主机映射：前端 :3002 → 容器
 |------|------|
 | `QWEN_API_KEY` / `QWEN_MODEL` | 通义千问（默认分配给「教案优化专家」） |
 | `KIMI_API_KEY` / `KIMI_MODEL` | Kimi（默认分配给「学生参与专家」） |
-| `DOUBAO_API_KEY` / `DOUBAO_MODEL` | 豆包（默认分配给「创新教学专家」） |
+| `DOUBAO_API_KEY` / `DOUBAO_MODEL` | 豆包 Chat（默认分配给「创新教学专家」，同时驱动课程工具的大纲/PPT/风格分析；PPT 走两阶段深度思考链路） |
+| ~~`DOUBAO_PPT_BOT_ID` / `DOUBAO_PPT_BOT_TIMEOUT`~~ | **已弃用**。早期火山方舟 PPT 智能体路线已由本地两阶段豆包深度生成取代；该变量保留只为兼容现有 `.env`，配了也不会被读取 |
+| ~~`COZE_API_KEY` / `COZE_BOT_ID` / `COZE_BASE_URL` / `COZE_PPT_TIMEOUT` / `COZE_POLL_INTERVAL`~~ | **已弃用**。Coze Bot 内置的 aippt 等第三方 PPT 插件返回的是营销页面 URL（不是真 .pptx 二进制），实测无法落地课堂可用文件，已从 `_do_ppt` 调用链中移除；保留环境变量字段仅为兼容已部署实例的 `.env`，配置不会再生效。未来如改走 Coze **Workflow** API（不是 Bot），会另起独立配置 |
 | `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` | DeepSeek（默认分配给「深度学习专家」） |
 | `SPARK_API_KEY` / `SPARK_MODEL` | 讯飞星火（默认分配给「认知发展专家」） |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` | OpenAI 兼容接口，可选 |
@@ -154,7 +187,30 @@ docker compose up -d                 # 宿主机映射：前端 :3002 → 容器
 |------|------|------|
 | `JWT_SECRET` | JWT 签名密钥（生产环境必须更改） | — |
 | `BANNER_TEXT` | 系统公告文本（留空不显示） | 空 |
-| `MAX_CONCURRENT_TASKS` | 最大并发 AI 任务数 | 5 |
+
+### 队列与并发（Postgres-backed）
+
+| 变量 | 说明 | 默认 |
+|------|------|------|
+| `MAX_CONCURRENT_TASKS` | 单进程内 worker 协程数 = 全局最大并发 AI 任务数 | 8（compose 本地默认 5） |
+| `MAX_PER_USER_TASKS` | 单用户并发任务数上限（防刷屏） | 3 |
+| `TASK_TIMEOUT_SEC` | 单任务最长执行秒数（超时强制结束并释放名额） | 1200 |
+| `WORKER_LEASE_SEC` | worker 租约秒数（crash 后 sweeper 回队重跑） | 1800 |
+| `QUEUE_POLL_INTERVAL_MS` | 队列轮询间隔（毫秒），空闲时指数退避至 3s | 1000 |
+| `QUEUE_SWEEP_INTERVAL_SEC` | sweeper 扫描周期（秒）—— 回收超时 lease + GC | 30 |
+| `QUEUE_GC_DAYS` | 完成/失败 job 保留天数（超过被 sweeper 删除） | 7 |
+
+### 数据库连接池（可选覆盖，留空使用代码自适应）
+
+| 变量 | 说明 | 默认 |
+|------|------|------|
+| `DB_POOL_SIZE` | 主连接池大小 | Pooler 15 / 直连 10，或 `max(workers*2+5)` |
+| `DB_MAX_OVERFLOW` | 池满时的弹性溢出数 | Pooler 20 / 直连 10 |
+| `DB_POOL_TIMEOUT` | 检出连接的最长等待秒数 | 30 |
+| `DB_POOL_RECYCLE` | 连接回收秒数（避免 Supabase 超时断链） | 1800 |
+| `DB_STATEMENT_TIMEOUT_MS` | 服务端单条 SQL 超时（毫秒） | 120000 |
+| `DB_IDLE_TX_TIMEOUT_MS` | 事务空闲超时（毫秒） | 300000 |
+| `DB_COMMAND_TIMEOUT_SEC` | asyncpg 客户端单命令超时（秒） | 180 |
 
 ## 预置账号
 
@@ -170,14 +226,18 @@ docker compose up -d                 # 宿主机映射：前端 :3002 → 容器
 
 ## 并发、队列与数据库性能
 
-- **Supabase PostgreSQL + Pooler**：默认 10 主池 + 10 溢出；Pooler 模式下扩展到 20 + 30。`pool_recycle=1800s` 自动回收、`pool_pre_ping` 检测僵死连接
-- **服务端硬限制**：`statement_timeout=60s` 防慢查询、`idle_in_transaction_session_timeout=5min` 防空闲事务占连
-- **任务队列**：内存队列管理器（`backend/app/tasks/queue_manager.py`），Semaphore 限制最多 `MAX_CONCURRENT_TASKS`（默认 5）个 AI 任务同时执行，超出自动排队
-- **队列状态推送**：通过 Socket.IO `queue_position` 事件实时推送排队位置
+- **Supabase PostgreSQL + Pooler**：连接池大小依据 `MAX_CONCURRENT_TASKS` 自适应（Pooler 模式默认 15+20，直连默认 10+10）。`pool_recycle=1800s` 自动回收、`pool_pre_ping` 检测僵死连接
+- **服务端硬限制**：`statement_timeout` 与 `idle_in_transaction_session_timeout` 可通过 `DB_STATEMENT_TIMEOUT_MS` / `DB_IDLE_TX_TIMEOUT_MS` 环境变量调整
+- **Postgres 持久化队列** (`backend/app/tasks/queue_manager.py`)：
+  - 任务写入 `queue_jobs` 表，`SELECT FOR UPDATE SKIP LOCKED` 抢锁，天然支持**多进程 / 多实例共享**
+  - 全局并发 `MAX_CONCURRENT_TASKS` + 单用户限流 `MAX_PER_USER_TASKS`
+  - `WORKER_LEASE_SEC` + sweeper 循环自动回收 crashed worker 名额、GC 过期 job
+  - 重启后进行中的任务会被自动重新拉起（lease 过期后回到 queued）
+- **队列状态推送**：Socket.IO `queue_position` 事件实时推送排队位置与运行 / 排队数量
 - **APScheduler**：线程池扩容至 10 workers，`misfire_grace_time=300s`
-- **性能索引**：`supabase_perf_indexes.sql` 新增 10 个复合索引 + FK 专属索引，覆盖 user/status/created_at、lesson/stage、course_tool 等高频查询
+- **性能索引**：`supabase_perf_indexes.sql` + `supabase_queue_migration.sql` 覆盖 user/status/created_at、lesson/stage、course_tool、queue_jobs 等高频查询
 - **游标分页**：`GET /api/v1/lessons?cursor=<ISO 时间>` 性能恒定 O(limit)，替代大 OFFSET 深分页
-- **Docker**：Uvicorn 4 workers，支持 20+ 并发用户
+- **横向扩容**：队列已持久化到 Supabase，直接启动多个后端容器/实例即可共享任务，无需 Redis
 
 ## 环境要求
 
@@ -190,18 +250,29 @@ docker compose up -d                 # 宿主机映射：前端 :3002 → 容器
 
 ### 建表与索引
 
-1. **表结构**：在 Supabase Dashboard → SQL Editor 执行 `supabase_schema.sql`
+在 Supabase Dashboard → SQL Editor 按顺序执行：
+
+1. **表结构** —— `supabase_schema.sql`
    - 建立 7 张业务表：`users` / `lesson_plans` / `discussions` / `annotations` / `lesson_series` / `course_tool_results` / `teaching_models`
    - 内置 `teaching_models` 3 条种子数据（5E / BOPPPS / PBL）
    - `updated_at` 自动更新触发器
 
-2. **性能索引**：再执行 `supabase_perf_indexes.sql`
-   - 10 个复合索引（user+created、user+status+created、lesson+stage+created 等）
+2. **性能索引** —— `supabase_perf_indexes.sql`
+   - 复合索引（user+created、user+status+created、lesson+stage+created 等）
    - FK 专属部分索引（仅索引非 NULL 值）
    - 活跃状态部分索引（仅队列/处理中）
    - `ANALYZE` 刷新统计
 
-两个脚本都是 `CREATE ... IF NOT EXISTS`，可**重复执行**，不会报错。
+3. **持久化队列** —— `supabase_queue_migration.sql`
+   - 建表 `queue_jobs`（kind / target_id / user_id / status / priority / lease_expires_at 等）
+   - 唯一部分索引（同一活跃 kind+target_id 去重）
+   - 抢锁索引 `idx_queue_jobs_pick` 支持 `SELECT FOR UPDATE SKIP LOCKED`
+   - 自动 VACUUM/ANALYZE 调优
+
+4. **大学年级扩展** —— `supabase_university_migration.sql`
+   - 为 `lesson_series` / `lesson_plans` 新增大学专用字段（专业、必修/选修、教学进度等）
+
+所有脚本都是 `CREATE ... IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`，可**重复执行**，不会报错。
 
 ### 查看数据
 
@@ -231,8 +302,9 @@ docker compose up -d                 # 宿主机映射：前端 :3002 → 容器
 | AI 模型 | Qwen / Kimi / Doubao / DeepSeek / Spark / OpenAI (OpenAI SDK 兼容接口) |
 | 实时通信 | Socket.IO (WebSocket + 长轮询回退) |
 | 认证 | JWT (PyJWT) + PBKDF2 密码哈希 |
-| 导出 | python-docx, python-pptx, xhtml2pdf, pdfplumber |
-| 部署 | Docker Compose (Nginx + Uvicorn 4 workers) |
+| 队列 | Supabase Postgres 持久化队列（`SELECT FOR UPDATE SKIP LOCKED`） |
+| 导出 | python-docx, python-pptx, openpyxl, xhtml2pdf, pdfplumber, PyPDF2, html2text |
+| 部署 | Docker Compose (本地双容器) / Coolify 单容器 (Nginx + Supervisor + Uvicorn) |
 
 ## 前端页面
 
@@ -247,6 +319,8 @@ docker compose up -d                 # 宿主机映射：前端 :3002 → 容器
 | 教案结果 | `/lesson/:id/result` | 查看完整教案，导出多种格式 |
 | 课程工具 | `/course-tools/:lessonId?` | 基于教案/大纲生成 PPT、习题、课堂练习、教学大纲四类内容 |
 | 系列教案 | `/series` | 学期规划 & 批量生成同一课程系列 |
+| 大学教案 | `/university` | 大学专用：单节/多周/整学期教案（Qwen）+ 可选习题实操（DeepSeek）+ 合并/分 ZIP 导出 |
+| 模板 AI 填写 | `/template-fill` | 上传 docx/pptx/xlsx/txt/md 模板 + 描述内容，Qwen 识别占位符后填入，保留原排版，支持跨格式导出 |
 
 右上角有 **语言切换器** (zh-CN / zh-TW / en)，所有 UI 文案 + AI 生成内容均会跟随切换；顶部有**系统公告 Banner**。
 
@@ -266,7 +340,10 @@ docker compose up -d                 # 宿主机映射：前端 :3002 → 容器
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/v1/system/banner` | 获取系统公告 |
-| GET | `/api/v1/system/queue` | 获取任务队列状态 |
+| GET | `/api/v1/system/queue` | 获取任务队列状态（运行中 / 排队 / 总并发上限） |
+| GET | `/api/v1/system/queue/jobs` | 查看队列中所有 job（管理员） |
+| GET | `/api/v1/system/queue/jobs/{target_id}` | 单个 job 状态详情 |
+| GET | `/health` | 健康检查（含 DB 连接池状态 + 队列状态） |
 
 ### 教学模型
 
@@ -299,13 +376,25 @@ docker compose up -d                 # 宿主机映射：前端 :3002 → 容器
 | GET | `/api/v1/series/:id` | 系列详情（含大纲） |
 | POST | `/api/v1/series/:id/generate-syllabus` | 触发 AI 生成学期大纲 |
 | POST | `/api/v1/series/:id/batch-generate` | 按大纲批量生成教案 |
+| GET | `/api/v1/series/:id/export-merged` | 合并导出整个系列（单文件） |
+| GET | `/api/v1/series/:id/export-zip` | 按周打包 ZIP 导出 |
+
+### 模板 AI 填写
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/v1/template-fill/analyze` | 上传模板并识别占位符 |
+| POST | `/api/v1/template-fill/generate` | 依据用户意图调用 Qwen 生成并回填模板 |
+| GET | `/api/v1/template-fill/history` | 查看最近填写历史 |
+| GET | `/api/v1/template-fill/:result_id/download?fmt=docx\|pptx\|xlsx\|txt\|md\|pdf` | 以指定格式下载填好的文件 |
 
 ### 课程工具
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/v1/course-tools/outline` | 生成课程大纲（学期 / 单课时） |
-| POST | `/api/v1/course-tools/ppt` | 生成 PPT（Doubao + python-pptx） |
+| POST | `/api/v1/course-tools/ppt/analyze-style/stream` | SSE 流式风格分析，返回 3 个模板候选（palette + layout_style + typography + cover_style） |
+| POST | `/api/v1/course-tools/ppt` | 生成 PPT（**本地两阶段豆包深度生成**：① 第一阶段调用豆包 Chat 产出 15-25 页 PPT 大纲骨架，含每页布局/标题/聚焦点；② 第二阶段以 `_PPT_PAGE_CONCURRENCY=8` 并发为每一页深度生成富文本要点（25-50 字/条）+ 80-200 字主讲稿，再用 `python-pptx` 的 12 种内置版式本地渲染。`_engine` 字段标注通道：`doubao_two_stage` / `doubao_single_shot`（两阶段失败时回退） |
 | POST | `/api/v1/course-tools/exercises` | 生成习题 / 日常作业 |
 | POST | `/api/v1/course-tools/practice` | 生成课堂练习 / 实操 |
 | GET | `/api/v1/course-tools/history` | 历史记录列表 |

@@ -1,6 +1,9 @@
 import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
-import { Users, Zap, Shield, FileText, ArrowRight, CheckCircle2 } from 'lucide-react'
+import {
+  Users, Zap, Shield, FileText, ArrowRight,
+  Presentation, ListTree, Pencil, Bell, Loader2,
+} from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
 import { useT } from '../i18n/translations'
 import Header from '../components/layout/Header'
@@ -50,11 +53,13 @@ export default function Landing() {
     { num: '04', title: t('landing.step4_title'), desc: t('landing.step4_desc') },
   ]
 
-  const demoDiscussion = [
-    { role: t('landing.demo_role1'), msg: t('landing.demo_msg1') },
-    { role: t('landing.demo_role2'), msg: t('landing.demo_msg2') },
-    { role: t('landing.demo_role3'), msg: t('landing.demo_msg3') },
+  const libraryItems = [
+    { key: 'lib1', icon: FileText, status: 'done' as const },
+    { key: 'lib2', icon: Presentation, status: 'done' as const },
+    { key: 'lib3', icon: ListTree, status: 'done' as const },
+    { key: 'lib4', icon: Pencil, status: 'running' as const },
   ]
+  const activeJobs = ['job1', 'job2', 'job3'] as const
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -121,27 +126,65 @@ export default function Landing() {
               <div className="w-3 h-3 rounded-full bg-green-400" />
               <span className="ml-3 text-xs text-gray-400">{t('landing.demo_bar')}</span>
             </div>
-            <div className="p-8 grid grid-cols-2 gap-6 min-h-[280px]">
+            <div className="p-6 grid grid-cols-2 gap-6 min-h-[300px]">
+              {/* Left: product library */}
               <div>
-                <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">{t('landing.demo_content')}</div>
-                <div className="space-y-3">
-                  {(['landing.demo_s1', 'landing.demo_s2', 'landing.demo_s3', 'landing.demo_s4', 'landing.demo_s5'] as const).map((key, i) => (
-                    <div key={key} className="flex items-center gap-2.5">
-                      <CheckCircle2 className={`w-4 h-4 ${i < 3 ? 'text-brand-500' : 'text-gray-300'}`} />
-                      <span className={`text-sm ${i < 3 ? 'text-gray-900' : 'text-gray-400'}`}>{t(key)}</span>
+                <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">
+                  {t('landing.demo_library')}
+                </div>
+                <div className="space-y-2">
+                  {libraryItems.map(({ key, icon: Icon, status }) => (
+                    <div
+                      key={key}
+                      className="flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-gray-50 border border-transparent hover:border-brand-100 transition-colors"
+                    >
+                      <Icon className="w-3.5 h-3.5 text-brand-600 flex-shrink-0" />
+                      <span className="text-xs text-gray-700 flex-1 truncate">
+                        {t(`landing.demo_${key}`)}
+                      </span>
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded-full whitespace-nowrap ${
+                          status === 'done'
+                            ? 'bg-green-100 text-green-700'
+                            : 'bg-amber-100 text-amber-700'
+                        }`}
+                      >
+                        {t(`landing.demo_status_${status}`)}
+                      </span>
                     </div>
                   ))}
                 </div>
               </div>
+
+              {/* Right: active jobs + toast */}
               <div>
-                <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">{t('landing.demo_discussion')}</div>
-                <div className="space-y-2.5">
-                  {demoDiscussion.map((d) => (
-                    <div key={d.role} className="bg-gray-50 rounded-lg p-3">
-                      <div className="text-xs font-medium text-brand-700">{d.role}</div>
-                      <div className="text-xs text-gray-500 mt-1">{d.msg}</div>
+                <div className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                  {t('landing.demo_jobs')}
+                  <span className="bg-red-500 text-white text-[10px] rounded-full w-4 h-4 flex items-center justify-center font-semibold">
+                    3
+                  </span>
+                </div>
+                <div className="space-y-2">
+                  {activeJobs.map((k) => (
+                    <div
+                      key={k}
+                      className="rounded-lg p-2.5 bg-gradient-to-r from-brand-50 to-white border border-brand-100"
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <Loader2 className="w-3 h-3 text-brand-600 animate-spin flex-shrink-0" />
+                        <span className="text-xs font-medium text-gray-800 truncate">
+                          {t(`landing.demo_${k}_title`)}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-gray-500 mt-0.5 truncate">
+                        {t(`landing.demo_${k}_sub`)}
+                      </div>
                     </div>
                   ))}
+                  <div className="rounded-lg p-2 bg-green-50 border border-green-200 text-[11px] text-green-700 flex items-center gap-1.5">
+                    <Bell className="w-3 h-3 flex-shrink-0" />
+                    <span className="truncate">{t('landing.demo_toast')}</span>
+                  </div>
                 </div>
               </div>
             </div>

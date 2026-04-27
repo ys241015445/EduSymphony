@@ -33,3 +33,15 @@ export function leaveLesson(lessonId: string) {
   const s = getSocket()
   s.emit('leave_lesson', { lesson_id: lessonId })
 }
+
+export function joinUser(userId: string) {
+  const s = getSocket()
+  const doJoin = () => s.emit('join_user', { user_id: userId })
+  if (s.connected) doJoin()
+  s.on('connect', doJoin)
+}
+
+export function leaveUser(userId: string) {
+  const s = getSocket()
+  s.emit('leave_user', { user_id: userId })
+}

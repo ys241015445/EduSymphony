@@ -40,6 +40,7 @@ class LessonPlan(Base):
     locale = Column(String(10), default="zh-CN")
     sequence_id = Column(String(36), nullable=True)
     sequence_order = Column(Integer, nullable=True)
+    education_level = Column(String(20), default="k12")
 
     source_type = Column(String(20), nullable=False)
     source_content = Column(Text)
@@ -86,6 +87,13 @@ class LessonSeries(Base):
     syllabus = Column(JSON)
     status = Column(String(20), default="draft")
     mode = Column(String(20), default="full_auto")
+    education_level = Column(String(20), default="k12")
+    major = Column(String(200), nullable=True)
+    course_type = Column(String(20), nullable=True)
+    course_nature = Column(String(20), nullable=True)
+    schedule_text = Column(Text, nullable=True)
+    outline_text = Column(Text, nullable=True)
+    special_requirements = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

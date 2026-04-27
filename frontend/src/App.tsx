@@ -11,6 +11,11 @@ import LessonResult from './pages/LessonResult'
 import SeriesCreate from './pages/SeriesCreate'
 import SeriesDashboard from './pages/SeriesDashboard'
 import CourseTools from './pages/CourseTools'
+import CourseToolsLibrary from './pages/CourseToolsLibrary'
+import UniversityCreate from './pages/UniversityCreate'
+import UniversityDashboard from './pages/UniversityDashboard'
+import TemplateFill from './pages/TemplateFill'
+import { Toaster } from './components/ui/Toast'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const token = useAuthStore((s) => s.token)
@@ -22,6 +27,7 @@ export default function App() {
   return (
     <>
     <Banner />
+    <Toaster />
     <Routes>
       <Route path="/" element={<Landing />} />
       <Route path="/login" element={<Auth />} />
@@ -82,10 +88,42 @@ export default function App() {
         }
       />
       <Route
+        path="/course-tools/library"
+        element={
+          <ProtectedRoute>
+            <CourseToolsLibrary />
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/course-tools/:lessonId?"
         element={
           <ProtectedRoute>
             <CourseTools />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/university/new"
+        element={
+          <ProtectedRoute>
+            <UniversityCreate />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/university/:id"
+        element={
+          <ProtectedRoute>
+            <UniversityDashboard />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/template-fill"
+        element={
+          <ProtectedRoute>
+            <TemplateFill />
           </ProtectedRoute>
         }
       />

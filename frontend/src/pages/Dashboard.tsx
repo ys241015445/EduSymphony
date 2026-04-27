@@ -5,7 +5,8 @@ import { useT } from '../i18n/translations'
 import Header from '../components/layout/Header'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
-import { Plus, FileText, Clock, CheckCircle2, AlertCircle, Loader2, Trash2, Zap, BookOpen, Wrench } from 'lucide-react'
+import { Plus, FileText, Clock, CheckCircle2, AlertCircle, Loader2, Trash2, Zap, BookOpen, Wrench, GraduationCap, FileEdit, Library } from 'lucide-react'
+import { useJobsStore } from '../stores/jobsStore'
 
 const statusConfig: Record<string, { labelKey: string; color: string; icon: any }> = {
   queued: { labelKey: 'dashboard.status.queued', color: 'text-yellow-600 bg-yellow-50', icon: Clock },
@@ -81,10 +82,17 @@ function LessonCard({ lesson }: { lesson: LessonSummary }) {
 export default function Dashboard() {
   const t = useT()
   const { lessons, loading, fetchLessons } = useLessonStore()
+  const jobs = useJobsStore((s) => s.items)
+  const bindSocket = useJobsStore((s) => s.bindSocket)
+  const refreshJobs = useJobsStore((s) => s.refreshFromServer)
 
   useEffect(() => {
     fetchLessons()
-  }, [fetchLessons])
+    bindSocket()
+    refreshJobs()
+  }, [fetchLessons, bindSocket, refreshJobs])
+
+  const activeJobs = jobs.filter((j) => j.status === 'queued' || j.status === 'running')
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -108,10 +116,28 @@ export default function Dashboard() {
                 {t('dashboard.series')}
               </Button>
             </Link>
+            <Link to="/university/new">
+              <Button variant="secondary" className="!border-indigo-300 !text-indigo-700 !bg-indigo-50 hover:!bg-indigo-100">
+                <GraduationCap className="w-4 h-4 mr-1.5" />
+                {t('dashboard.university')}
+              </Button>
+            </Link>
             <Link to="/course-tools">
               <Button variant="secondary" className="!border-teal-300 !text-teal-700 !bg-teal-50 hover:!bg-teal-100">
                 <Wrench className="w-4 h-4 mr-1.5" />
                 {t('dashboard.course_tools')}
+              </Button>
+            </Link>
+            <Link to="/course-tools/library">
+              <Button variant="secondary" className="!border-cyan-300 !text-cyan-700 !bg-cyan-50 hover:!bg-cyan-100">
+                <Library className="w-4 h-4 mr-1.5" />
+                {t('dashboard.course_library')}
+              </Button>
+            </Link>
+            <Link to="/template-fill">
+              <Button variant="secondary" className="!border-emerald-300 !text-emerald-700 !bg-emerald-50 hover:!bg-emerald-100">
+                <FileEdit className="w-4 h-4 mr-1.5" />
+                {t('dashboard.template_fill')}
               </Button>
             </Link>
             <Link to="/lesson/new">
@@ -122,6 +148,25 @@ export default function Dashboard() {
             </Link>
           </div>
         </div>
+
+        {activeJobs.length > 0 && (
+          <Link
+            to="/course-tools/library"
+            className="mb-6 flex items-center gap-3 rounded-xl border border-brand-200 bg-gradient-to-r from-brand-50 to-blue-50 px-4 py-3 hover:shadow-sm transition-all"
+          >
+            <Loader2 className="w-5 h-5 text-brand-600 animate-spin" />
+            <div className="flex-1">
+              <div className="text-sm font-medium text-brand-900">
+                {t('tools.active_jobs_label').replace('{n}', String(activeJobs.length))}
+              </div>
+              <div className="text-xs text-brand-700 mt-0.5">
+                {activeJobs.slice(0, 3).map((j) => j.title || t(`tools.tab_${j.tool_type}`)).join(' · ')}
+                {activeJobs.length > 3 ? ' · ...' : ''}
+              </div>
+            </div>
+            <div className="text-xs text-brand-600 font-medium">{t('tools.go_to_library')} →</div>
+          </Link>
+        )}
 
         {loading ? (
           <div className="text-center py-20">

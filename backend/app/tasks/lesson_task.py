@@ -52,6 +52,21 @@ AGENT_ROLES = [
 ]
 
 
+def _writer_provider(lesson: "LessonPlan") -> Optional[str]:
+    """Pick the main-writer provider.
+
+    University lessons explicitly pin the main writer to Qwen per product spec.
+    Other levels fall back to AIService default order (qwen/kimi/doubao/...).
+    """
+    try:
+        level = (getattr(lesson, "education_level", None) or "").lower()
+    except Exception:
+        level = ""
+    if level == "university":
+        return "qwen"
+    return None
+
+
 def _build_discussion_stages_for(active_models: List[Dict]) -> List[Dict]:
     """Build flat list of per-model, per-stage items for discussion from Qwen-recommended models."""
     stages = []
@@ -1675,9 +1690,11 @@ AI教師
 
         full_text = ""
         chunk_count = 0
+        writer_provider = _writer_provider(lesson)
         try:
             async for chunk in self.ai_service.generate_stream(
                 prompt, system_message=sys_msg, max_tokens=8000,
+                provider_name=writer_provider,
             ):
                 full_text += chunk
                 chunk_count += 1
@@ -1698,6 +1715,7 @@ AI教師
             logger.warning(f"Full draft stream failed: {e}, falling back")
             full_text = await self.ai_service.generate(
                 prompt, system_message=sys_msg, max_tokens=8000,
+                provider_name=writer_provider,
             )
 
         full_text = _strip_markdown(full_text)
@@ -1820,9 +1838,11 @@ AI教師
 
         full_text = ""
         chunk_count = 0
+        writer_provider = _writer_provider(lesson)
         try:
             async for chunk in self.ai_service.generate_stream(
                 prompt, system_message=sys_msg, max_tokens=8000,
+                provider_name=writer_provider,
             ):
                 full_text += chunk
                 chunk_count += 1
@@ -1842,6 +1862,7 @@ AI教師
             logger.warning(f"Full optimized stream failed: {e}")
             full_text = await self.ai_service.generate(
                 prompt, system_message=sys_msg, max_tokens=8000,
+                provider_name=writer_provider,
             )
 
         full_text = _strip_markdown(full_text)
@@ -1906,9 +1927,11 @@ AI教師
         sys_msg = f"你是资深教案编写专家，熟练掌握{model_names_str}等教学模型。请直接输出纯文本，不要使用Markdown格式。{_locale_hint(lesson)}"
 
         full_text = ""
+        writer_provider = _writer_provider(lesson)
         try:
             async for chunk in self.ai_service.generate_stream(
                 prompt, system_message=sys_msg,
+                provider_name=writer_provider,
             ):
                 full_text += chunk
                 await _emit("stream_chunk", {
@@ -1918,7 +1941,10 @@ AI教師
                 }, room)
         except Exception as e:
             logger.warning(f"Draft stream failed: {e}")
-            full_text = await self.ai_service.generate(prompt, system_message=sys_msg)
+            full_text = await self.ai_service.generate(
+                prompt, system_message=sys_msg,
+                provider_name=writer_provider,
+            )
 
         full_text = _strip_markdown(full_text)
 
@@ -2357,9 +2383,11 @@ AI教師
         sys_msg = f"你是资深教案编写专家，熟练掌握{model_names_str}等教学模型。请直接输出纯文本，不要使用Markdown格式。{_locale_hint(lesson)}"
 
         full_text = ""
+        writer_provider = _writer_provider(lesson)
         try:
             async for chunk in self.ai_service.generate_stream(
                 prompt, system_message=sys_msg,
+                provider_name=writer_provider,
             ):
                 full_text += chunk
                 await _emit("stream_chunk", {
@@ -2369,7 +2397,10 @@ AI教師
                 }, room)
         except Exception as e:
             logger.warning(f"Finalize stream failed: {e}")
-            full_text = await self.ai_service.generate(prompt, system_message=sys_msg)
+            full_text = await self.ai_service.generate(
+                prompt, system_message=sys_msg,
+                provider_name=writer_provider,
+            )
 
         full_text = _strip_markdown(full_text)
 

@@ -32,6 +32,13 @@ class SeriesResponse(BaseModel):
     syllabus: Optional[dict] = None
     status: str
     mode: str = "full_auto"
+    education_level: Optional[str] = "k12"
+    major: Optional[str] = None
+    course_type: Optional[str] = None
+    course_nature: Optional[str] = None
+    schedule_text: Optional[str] = None
+    outline_text: Optional[str] = None
+    special_requirements: Optional[str] = None
     created_at: Optional[datetime] = None
 
     class Config:
@@ -46,6 +53,7 @@ class SeriesListResponse(BaseModel):
     total_weeks: int
     lessons_per_week: int
     status: str
+    education_level: Optional[str] = "k12"
     created_at: Optional[datetime] = None
 
     class Config:
@@ -66,6 +74,13 @@ async def create_series(
     mode: str = Form("full_auto"),
     source_content: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
+    education_level: str = Form("k12"),
+    major: Optional[str] = Form(None),
+    course_type: Optional[str] = Form(None),
+    course_nature: Optional[str] = Form(None),
+    schedule_text: Optional[str] = Form(None),
+    outline_text: Optional[str] = Form(None),
+    special_requirements: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -100,13 +115,20 @@ async def create_series(
         book_content=book_content,
         mode=mode,
         status="generating_syllabus",
+        education_level=education_level or "k12",
+        major=major,
+        course_type=course_type,
+        course_nature=course_nature,
+        schedule_text=schedule_text,
+        outline_text=outline_text,
+        special_requirements=special_requirements,
     )
     db.add(series)
     await db.commit()
     await db.refresh(series)
 
     from app.tasks.queue_manager import enqueue
-    await enqueue(series.id, _generate_syllabus)
+    await enqueue(series.id, user_id=str(current_user.id), kind="syllabus")
 
     return SeriesResponse.model_validate(series)
 
@@ -178,9 +200,7 @@ async def generate_all_lessons(
     syllabus = series.syllabus
     lessons_data = syllabus.get("lessons", [])
 
-    from app.tasks.lesson_task import LessonTaskHandler
     from app.tasks.queue_manager import enqueue
-    handler = LessonTaskHandler()
 
     created_ids = []
     prev_lesson_id = None
@@ -203,6 +223,8 @@ async def generate_all_lessons(
             sequence_id=series.id,
             sequence_order=i + 1,
             status=LessonStatus.QUEUED.value,
+            education_level=getattr(series, "education_level", None) or "k12",
+            avoid_issues=series.special_requirements,
         )
         db.add(lesson)
         created_ids.append(lesson.id)
@@ -213,7 +235,7 @@ async def generate_all_lessons(
     await db.commit()
 
     for lid in created_ids:
-        await enqueue(lid, handler.process_lesson)
+        await enqueue(lid, user_id=str(current_user.id), kind="lesson_series")
 
     series.status = "generating"
     await db.commit()
@@ -234,7 +256,30 @@ async def _generate_syllabus(series_id: str):
                 return
 
             ai = AIService()
-            prompt = f"""你是课程规划专家。请根据以下信息，为一个学期的课程生成详细的教学大纲。
+
+            is_university = (getattr(series, "education_level", None) or "k12").lower() == "university"
+            uni_ctx_lines = []
+            if is_university:
+                uni_ctx_lines.append("【本课程为大学/高校课程，请按高等教育课程标准设计】")
+                if getattr(series, "major", None):
+                    uni_ctx_lines.append(f"专业：{series.major}")
+                if getattr(series, "course_type", None):
+                    ct = {"required": "必修课", "elective": "选修课"}.get(series.course_type, series.course_type)
+                    uni_ctx_lines.append(f"课程类别：{ct}")
+                if getattr(series, "course_nature", None):
+                    cn = {"theory": "理论课", "practical": "实操/实践课", "mixed": "理论+实操混合"}.get(
+                        series.course_nature, series.course_nature
+                    )
+                    uni_ctx_lines.append(f"课程性质：{cn}")
+                if getattr(series, "schedule_text", None):
+                    uni_ctx_lines.append(f"【教学进度表】\n{series.schedule_text}")
+                if getattr(series, "outline_text", None):
+                    uni_ctx_lines.append(f"【已有教学大纲】\n{series.outline_text}")
+                if getattr(series, "special_requirements", None):
+                    uni_ctx_lines.append(f"【特别注意事项】\n{series.special_requirements}")
+            uni_ctx = "\n".join(uni_ctx_lines)
+
+            prompt = f"""你是{"高校课程规划专家" if is_university else "课程规划专家"}。请根据以下信息，为一个学期的课程生成详细的教学大纲。
 
 【课程信息】
 课程名称：{series.title}
@@ -247,6 +292,8 @@ async def _generate_syllabus(series_id: str):
 
 {f'教学目标：{series.objectives}' if series.objectives else ''}
 {f'素质培养目标：{series.quality_goals}' if series.quality_goals else ''}
+
+{uni_ctx}
 
 【教材内容摘要】
 {(series.book_content or '')[:5000]}
@@ -269,8 +316,19 @@ async def _generate_syllabus(series_id: str):
 
 请确保课时总数为{series.total_weeks * series.lessons_per_week}，按周排列。"""
 
-            sys_msg = "你是资深课程规划专家。请生成完整的学期教学大纲，严格按JSON格式输出。"
-            raw = await ai.generate(prompt, system_message=sys_msg, max_tokens=6000)
+            sys_msg = (
+                "你是资深高校课程规划专家，请按照高等教育教学设计规范输出，"
+                "严格按JSON格式返回。"
+                if is_university
+                else "你是资深课程规划专家。请生成完整的学期教学大纲，严格按JSON格式输出。"
+            )
+            provider = "qwen" if is_university else None
+            raw = await ai.generate(
+                prompt,
+                system_message=sys_msg,
+                max_tokens=6000,
+                provider_name=provider,
+            )
 
             import json, re
             json_match = re.search(r'\{[\s\S]*\}', raw)

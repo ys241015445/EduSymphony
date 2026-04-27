@@ -18,7 +18,7 @@ from app.core.config import settings
 from app.core.deps import get_db, get_current_active_user
 from app.core.database import async_session_maker
 from app.models.user import User
-from app.models.lesson import LessonPlan
+from app.models.lesson import LessonPlan, LessonSeries
 
 router = APIRouter(prefix="/export", tags=["导出"])
 
@@ -942,3 +942,640 @@ async def convert_html_to_pdf(
     except Exception as e:
         logger.error(f"HTML-to-PDF conversion failed: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"PDF转换失败: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Series-level exports: merged single file / zip per-lesson
+# ---------------------------------------------------------------------------
+
+ALLOWED_SERIES_FORMATS = {"docx", "pdf", "md", "txt", "json"}
+
+
+async def _load_series_lessons(series_id: str, db: AsyncSession, user: User) -> tuple[LessonSeries, list[LessonPlan]]:
+    r = await db.execute(
+        select(LessonSeries).where(LessonSeries.id == series_id, LessonSeries.user_id == user.id)
+    )
+    series = r.scalar_one_or_none()
+    if not series:
+        raise HTTPException(status_code=404, detail="系列不存在")
+    r2 = await db.execute(
+        select(LessonPlan)
+        .where(LessonPlan.sequence_id == series_id, LessonPlan.user_id == user.id)
+        .order_by(LessonPlan.sequence_order)
+    )
+    lessons = list(r2.scalars().all())
+    if not lessons:
+        raise HTTPException(status_code=400, detail="该系列尚未生成任何教案")
+    return series, lessons
+
+
+def _lesson_plain_text(d: dict) -> str:
+    lines = [d["title"], "=" * 40]
+    for k, v in d["meta"].items():
+        lines.append(f"{k}: {v}")
+    lines.append("")
+    if d["full_optimized"]:
+        lines.append("【优化教案】")
+        lines.append(d["full_optimized"])
+        lines.append("")
+    if d["full_draft"]:
+        lines.append("【初步教案】")
+        lines.append(d["full_draft"])
+        lines.append("")
+    if d["stages"]:
+        lines.append("【各环节详情】")
+        for s in d["stages"]:
+            header = f"{s['model_name']} - {s['stage_name']}" if s["model_name"] else s["stage_name"]
+            lines.append(f">> {header}")
+            if s["expert"]:
+                lines.append(f"   采纳专家: {s['expert']}")
+            lines.append(s["content"] or s["draft"] or "")
+            lines.append("")
+    return "\n".join(lines)
+
+
+def _lesson_markdown(d: dict, level_offset: int = 0) -> str:
+    H = lambda n: "#" * max(1, n + level_offset)
+    lines = [f"{H(1)} {d['title']}", ""]
+    for k, v in d["meta"].items():
+        lines.append(f"- **{k}**: {v}")
+    lines.append("")
+    if d["full_optimized"]:
+        lines.append(f"{H(2)} 优化教案")
+        lines.append("")
+        lines.append(d["full_optimized"])
+        lines.append("")
+    if d["full_draft"]:
+        lines.append(f"{H(2)} 初步教案")
+        lines.append("")
+        lines.append(d["full_draft"])
+        lines.append("")
+    if d["stages"]:
+        lines.append(f"{H(2)} 各环节详情")
+        lines.append("")
+        for s in d["stages"]:
+            header = f"{s['model_name']} - {s['stage_name']}" if s["model_name"] else s["stage_name"]
+            lines.append(f"{H(3)} {header}")
+            if s["expert"]:
+                lines.append(f"*采纳专家: {s['expert']}*")
+            lines.append("")
+            lines.append(s["content"] or s["draft"] or "(无内容)")
+            lines.append("")
+    return "\n".join(lines)
+
+
+def _fetch_series_exercises_map(series_id: str, user_id: str) -> dict:
+    """Pre-fetch all exercises/practice CourseToolResult keyed by lesson_id for a series.
+
+    Returns empty dict if the table isn't available.
+    """
+    return {}
+
+
+async def _fetch_exercises_for_lessons(
+    db: AsyncSession, user_id: str, lesson_ids: list[str]
+) -> dict[str, list[dict]]:
+    """Return {lesson_id: [ {tool_type, title, result} ... ]}."""
+    from app.models.course_tool import CourseToolResult
+    if not lesson_ids:
+        return {}
+    r = await db.execute(
+        select(CourseToolResult)
+        .where(
+            CourseToolResult.user_id == user_id,
+            CourseToolResult.lesson_id.in_(lesson_ids),
+            CourseToolResult.tool_type.in_(["exercises", "practice"]),
+        )
+        .order_by(CourseToolResult.created_at.desc())
+    )
+    items = r.scalars().all()
+    out: dict[str, list[dict]] = {}
+    for it in items:
+        out.setdefault(it.lesson_id, []).append({
+            "tool_type": it.tool_type,
+            "title": (it.result or {}).get("title", ""),
+            "result": it.result or {},
+        })
+    return out
+
+
+def _render_exercises_text(block: dict) -> str:
+    """Turn a CourseToolResult.result (exercises or practice) into plain text."""
+    tt = block["tool_type"]
+    data = block["result"] or {}
+    out: list[str] = []
+    if tt == "exercises":
+        out.append(f"【习题：{data.get('title', '')}】")
+        for ex in data.get("exercises", []):
+            out.append(f"{ex.get('id', '')}. {ex.get('question', '')}")
+            for opt in ex.get("options", []) or []:
+                out.append(f"    {opt}")
+            if ex.get("answer"):
+                out.append(f"  答案：{ex['answer']}")
+            if ex.get("explanation"):
+                out.append(f"  解析：{ex['explanation']}")
+            out.append("")
+    elif tt == "practice":
+        out.append(f"【课上练习：{data.get('title', '')}】")
+        if data.get("theory_summary"):
+            out.append("理论要点：")
+            out.append(data["theory_summary"])
+            out.append("")
+        for p in data.get("practices", []):
+            out.append(f"- {p.get('title', '')}: {p.get('description', '')}")
+        if data.get("assessment_criteria"):
+            out.append("评价标准：")
+            out.append(data["assessment_criteria"])
+    return "\n".join(out)
+
+
+def _render_exercises_md(block: dict, level_offset: int = 0) -> str:
+    H = lambda n: "#" * max(1, n + level_offset)
+    tt = block["tool_type"]
+    data = block["result"] or {}
+    out: list[str] = []
+    if tt == "exercises":
+        out.append(f"{H(3)} 习题：{data.get('title', '')}")
+        out.append("")
+        for ex in data.get("exercises", []):
+            out.append(f"**{ex.get('id', '')}. {ex.get('question', '')}**")
+            for opt in ex.get("options", []) or []:
+                out.append(f"- {opt}")
+            if ex.get("answer"):
+                out.append(f"> 答案：{ex['answer']}")
+            if ex.get("explanation"):
+                out.append(f"> 解析：{ex['explanation']}")
+            out.append("")
+    elif tt == "practice":
+        out.append(f"{H(3)} 课上练习：{data.get('title', '')}")
+        out.append("")
+        if data.get("theory_summary"):
+            out.append(f"{H(4)} 理论要点")
+            out.append("")
+            out.append(data["theory_summary"])
+            out.append("")
+        for p in data.get("practices", []):
+            out.append(f"- **{p.get('title', '')}**: {p.get('description', '')}")
+        if data.get("assessment_criteria"):
+            out.append("")
+            out.append(f"{H(4)} 评价标准")
+            out.append("")
+            out.append(data["assessment_criteria"])
+    return "\n".join(out)
+
+
+def _render_exercises_docx(doc, block: dict):
+    from docx.shared import Pt
+    tt = block["tool_type"]
+    data = block["result"] or {}
+    if tt == "exercises":
+        doc.add_heading(f"习题：{data.get('title', '')}", level=3)
+        for ex in data.get("exercises", []):
+            p = doc.add_paragraph()
+            run = p.add_run(f"{ex.get('id', '')}. {ex.get('question', '')}")
+            run.bold = True
+            for opt in ex.get("options", []) or []:
+                doc.add_paragraph(f"    {opt}")
+            if ex.get("answer"):
+                doc.add_paragraph(f"  答案：{ex['answer']}")
+            if ex.get("explanation"):
+                doc.add_paragraph(f"  解析：{ex['explanation']}")
+    elif tt == "practice":
+        doc.add_heading(f"课上练习：{data.get('title', '')}", level=3)
+        if data.get("theory_summary"):
+            doc.add_heading("理论要点", level=4)
+            doc.add_paragraph(data["theory_summary"])
+        for p_item in data.get("practices", []):
+            doc.add_paragraph(f"- {p_item.get('title', '')}: {p_item.get('description', '')}")
+        if data.get("assessment_criteria"):
+            doc.add_heading("评价标准", level=4)
+            doc.add_paragraph(data["assessment_criteria"])
+
+
+def _render_exercises_pdf_elems(block: dict, S):
+    from reportlab.platypus import Paragraph
+    def esc(t: str) -> str:
+        return (t or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    elems = []
+    tt = block["tool_type"]
+    data = block["result"] or {}
+    if tt == "exercises":
+        elems.append(Paragraph(esc(f"习题：{data.get('title', '')}"), S["h3"]))
+        for ex in data.get("exercises", []):
+            elems.append(Paragraph(f"<b>{esc(str(ex.get('id', '')))}. {esc(ex.get('question', ''))}</b>", S["body"]))
+            for opt in ex.get("options", []) or []:
+                elems.append(Paragraph(esc(opt), S["body"]))
+            if ex.get("answer"):
+                elems.append(Paragraph(f"<i>答案：{esc(ex['answer'])}</i>", S["body"]))
+            if ex.get("explanation"):
+                elems.append(Paragraph(f"<i>解析：{esc(ex['explanation'])}</i>", S["body"]))
+    elif tt == "practice":
+        elems.append(Paragraph(esc(f"课上练习：{data.get('title', '')}"), S["h3"]))
+        if data.get("theory_summary"):
+            elems.append(Paragraph(esc(data["theory_summary"]), S["body"]))
+        for p_item in data.get("practices", []):
+            elems.append(Paragraph(esc(f"- {p_item.get('title', '')}: {p_item.get('description', '')}"), S["body"]))
+        if data.get("assessment_criteria"):
+            elems.append(Paragraph(f"<i>评价标准：{esc(data['assessment_criteria'])}</i>", S["body"]))
+    return elems
+
+
+def _series_prefix(series: LessonSeries, lesson: LessonPlan, idx: int) -> str:
+    """Compute W{week}-L{lesson_num}-{order} style prefix for file names & section headings."""
+    lpw = max(1, series.lessons_per_week or 1)
+    order = lesson.sequence_order or (idx + 1)
+    week = ((order - 1) // lpw) + 1
+    sub = ((order - 1) % lpw) + 1
+    return f"W{week:02d}-L{sub}"
+
+
+@router.get("/series/{series_id}/export-merged")
+async def export_series_merged(
+    series_id: str,
+    format: str = "docx",
+    include_exercises: bool = False,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Merge all lessons in a series into a single file (docx/pdf/md/txt/json)."""
+    fmt = (format or "docx").lower()
+    if fmt not in ALLOWED_SERIES_FORMATS:
+        raise HTTPException(status_code=400, detail=f"不支持的格式：{fmt}")
+
+    try:
+        series, lessons = await _load_series_lessons(series_id, db, current_user)
+    except HTTPException:
+        raise
+
+    lesson_ids = [l.id for l in lessons]
+    exercises_map: dict[str, list[dict]] = {}
+    if include_exercises:
+        exercises_map = await _fetch_exercises_for_lessons(db, current_user.id, lesson_ids)
+
+    built = []
+    for idx, lesson in enumerate(lessons):
+        if not lesson.final_content:
+            continue
+        d = _build_doc_sections(lesson)
+        built.append({"idx": idx, "lesson": lesson, "data": d,
+                      "prefix": _series_prefix(series, lesson, idx)})
+
+    if not built:
+        raise HTTPException(status_code=400, detail="系列中没有任何已完成的教案")
+
+    series_title = series.title or "系列教案"
+
+    if fmt == "json":
+        payload = {
+            "series": {
+                "id": series.id,
+                "title": series.title,
+                "subject": series.subject,
+                "grade_level": series.grade_level,
+                "total_weeks": series.total_weeks,
+                "lessons_per_week": series.lessons_per_week,
+                "education_level": getattr(series, "education_level", "k12"),
+                "major": getattr(series, "major", None),
+            },
+            "lessons": [],
+        }
+        for b in built:
+            item = {
+                "prefix": b["prefix"],
+                "sequence_order": b["lesson"].sequence_order,
+                "title": b["lesson"].title,
+                "final_content": _parse_fc(b["lesson"].final_content),
+            }
+            if include_exercises:
+                item["exercises"] = exercises_map.get(b["lesson"].id, [])
+            payload["lessons"].append(item)
+        text = json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default)
+        return Response(
+            content=text.encode("utf-8"),
+            media_type="application/json; charset=utf-8",
+            headers={"Content-Disposition": _content_disposition(series_title, "json")},
+        )
+
+    if fmt == "txt":
+        parts = [series_title, "=" * 40, ""]
+        if series.subject:
+            parts.append(f"学科：{series.subject}")
+        if series.grade_level:
+            parts.append(f"学段：{series.grade_level}")
+        if getattr(series, "major", None):
+            parts.append(f"专业：{series.major}")
+        parts.append(f"总课时：{len(built)}")
+        parts.append("")
+        for b in built:
+            parts.append(f"====== {b['prefix']}  {b['data']['title']} ======")
+            parts.append(_lesson_plain_text(b["data"]))
+            if include_exercises:
+                for blk in exercises_map.get(b["lesson"].id, []):
+                    parts.append("")
+                    parts.append(_render_exercises_text(blk))
+            parts.append("")
+        return Response(
+            content="\n".join(parts).encode("utf-8"),
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": _content_disposition(series_title, "txt")},
+        )
+
+    if fmt == "md":
+        parts = [f"# {series_title}", ""]
+        if series.subject:
+            parts.append(f"- **学科**: {series.subject}")
+        if series.grade_level:
+            parts.append(f"- **学段**: {series.grade_level}")
+        if getattr(series, "major", None):
+            parts.append(f"- **专业**: {series.major}")
+        parts.append(f"- **总课时**: {len(built)}")
+        parts.append("")
+        for b in built:
+            parts.append(f"## {b['prefix']}  {b['data']['title']}")
+            parts.append("")
+            # shift lesson's own H1 to H3 within the merged doc
+            parts.append(_lesson_markdown(b["data"], level_offset=2))
+            if include_exercises:
+                for blk in exercises_map.get(b["lesson"].id, []):
+                    parts.append("")
+                    parts.append(_render_exercises_md(blk, level_offset=2))
+            parts.append("")
+        return Response(
+            content="\n".join(parts).encode("utf-8"),
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": _content_disposition(series_title, "md")},
+        )
+
+    if fmt == "docx":
+        from docx import Document
+        from docx.shared import Pt
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        doc = Document()
+        style = doc.styles["Normal"]
+        style.font.size = Pt(11)
+        style.font.name = "SimSun"
+
+        title_para = doc.add_heading(series_title, level=0)
+        title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        meta_lines = []
+        if series.subject:
+            meta_lines.append(("学科", series.subject))
+        if series.grade_level:
+            meta_lines.append(("学段", series.grade_level))
+        if getattr(series, "major", None):
+            meta_lines.append(("专业", series.major))
+        meta_lines.append(("总课时", str(len(built))))
+        for k, v in meta_lines:
+            p = doc.add_paragraph()
+            rk = p.add_run(f"{k}: "); rk.bold = True
+            p.add_run(str(v))
+        doc.add_paragraph("")
+
+        for b in built:
+            doc.add_page_break()
+            doc.add_heading(f"{b['prefix']}  {b['data']['title']}", level=1)
+            d = b["data"]
+            for k, v in d["meta"].items():
+                p = doc.add_paragraph()
+                rk = p.add_run(f"{k}: "); rk.bold = True
+                p.add_run(str(v))
+            doc.add_paragraph("")
+            if d["full_optimized"]:
+                doc.add_heading("优化教案", level=2)
+                for line in d["full_optimized"].split("\n"):
+                    if line.strip():
+                        doc.add_paragraph(line.strip())
+            if d["full_draft"]:
+                doc.add_heading("初步教案", level=2)
+                for line in d["full_draft"].split("\n"):
+                    if line.strip():
+                        doc.add_paragraph(line.strip())
+            if d["stages"]:
+                doc.add_heading("各环节详情", level=2)
+                for s in d["stages"]:
+                    header = f"{s['model_name']} - {s['stage_name']}" if s["model_name"] else s["stage_name"]
+                    doc.add_heading(header, level=3)
+                    if s["expert"]:
+                        pp = doc.add_paragraph()
+                        run = pp.add_run(f"采纳专家: {s['expert']}"); run.italic = True
+                    for line in (s["content"] or s["draft"] or "").split("\n"):
+                        if line.strip():
+                            doc.add_paragraph(line.strip())
+            if include_exercises:
+                for blk in exercises_map.get(b["lesson"].id, []):
+                    _render_exercises_docx(doc, blk)
+
+        buf = BytesIO()
+        doc.save(buf)
+        buf.seek(0)
+        return Response(
+            content=buf.getvalue(),
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": _content_disposition(series_title, "docx")},
+        )
+
+    if fmt == "pdf":
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.lib.colors import HexColor
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, PageBreak
+
+        _ensure_pdf_font()
+        fn = _PDF_FONT_NAME
+        S = {
+            "title": ParagraphStyle("T", fontName=fn, fontSize=18, alignment=1, spaceAfter=10, leading=26),
+            "h1": ParagraphStyle("H1", fontName=fn, fontSize=15, spaceBefore=18, spaceAfter=10, leading=22),
+            "h2": ParagraphStyle("H2", fontName=fn, fontSize=13, spaceBefore=14, spaceAfter=6, leading=20),
+            "h3": ParagraphStyle("H3", fontName=fn, fontSize=12, spaceBefore=10, spaceAfter=6, leading=18),
+            "body": ParagraphStyle("B", fontName=fn, fontSize=10.5, leading=18, spaceAfter=3),
+            "meta": ParagraphStyle("M", fontName=fn, fontSize=10.5, leading=16, spaceAfter=2),
+        }
+
+        def esc(t: str) -> str:
+            return (t or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+        buf = BytesIO()
+        pdoc = SimpleDocTemplate(
+            buf, pagesize=A4,
+            leftMargin=2 * cm, rightMargin=2 * cm, topMargin=2 * cm, bottomMargin=2 * cm,
+        )
+        elems = [Paragraph(esc(series_title), S["title"]), Spacer(1, 6)]
+        if series.subject:
+            elems.append(Paragraph(f"<b>学科:</b> {esc(series.subject)}", S["meta"]))
+        if series.grade_level:
+            elems.append(Paragraph(f"<b>学段:</b> {esc(series.grade_level)}", S["meta"]))
+        if getattr(series, "major", None):
+            elems.append(Paragraph(f"<b>专业:</b> {esc(series.major)}", S["meta"]))
+        elems.append(Paragraph(f"<b>总课时:</b> {len(built)}", S["meta"]))
+        elems.append(HRFlowable(width="100%", thickness=0.5, color=HexColor("#cccccc")))
+
+        for b in built:
+            elems.append(PageBreak())
+            elems.append(Paragraph(esc(f"{b['prefix']}  {b['data']['title']}"), S["h1"]))
+            d = b["data"]
+            for k, v in d["meta"].items():
+                elems.append(Paragraph(f"<b>{esc(k)}:</b> {esc(str(v))}", S["meta"]))
+            elems.append(Spacer(1, 6))
+            for label, text in [("优化教案", d["full_optimized"]), ("初步教案", d["full_draft"])]:
+                if text:
+                    elems.append(Paragraph(esc(label), S["h2"]))
+                    for line in text.split("\n"):
+                        line = line.strip()
+                        if line:
+                            elems.append(Paragraph(esc(line), S["body"]))
+            if d["stages"]:
+                elems.append(Paragraph(esc("各环节详情"), S["h2"]))
+                for s in d["stages"]:
+                    header = f"{s['model_name']} - {s['stage_name']}" if s["model_name"] else s["stage_name"]
+                    elems.append(Paragraph(esc(header), S["h3"]))
+                    if s["expert"]:
+                        elems.append(Paragraph(f"<i>采纳专家: {esc(s['expert'])}</i>", S["meta"]))
+                    for line in (s["content"] or s["draft"] or "").split("\n"):
+                        line = line.strip()
+                        if line:
+                            elems.append(Paragraph(esc(line), S["body"]))
+            if include_exercises:
+                for blk in exercises_map.get(b["lesson"].id, []):
+                    elems.extend(_render_exercises_pdf_elems(blk, S))
+
+        pdoc.build(elems)
+        return Response(
+            content=buf.getvalue(),
+            media_type="application/pdf",
+            headers={"Content-Disposition": _content_disposition(series_title, "pdf")},
+        )
+
+    raise HTTPException(status_code=400, detail=f"暂不支持的格式：{fmt}")
+
+
+@router.get("/series/{series_id}/export-zip")
+async def export_series_zip(
+    series_id: str,
+    format: str = "docx",
+    include_exercises: bool = False,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Export each lesson as its own file and package into a zip archive."""
+    fmt = (format or "docx").lower()
+    if fmt not in ALLOWED_SERIES_FORMATS:
+        raise HTTPException(status_code=400, detail=f"不支持的格式：{fmt}")
+
+    series, lessons = await _load_series_lessons(series_id, db, current_user)
+
+    import zipfile
+    import re
+
+    def _safe_name(name: str) -> str:
+        name = re.sub(r"[\\/:*?\"<>|]", "_", name or "")
+        return name.strip() or "lesson"
+
+    lesson_ids = [l.id for l in lessons]
+    exercises_map: dict[str, list[dict]] = {}
+    if include_exercises:
+        exercises_map = await _fetch_exercises_for_lessons(db, current_user.id, lesson_ids)
+
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for idx, lesson in enumerate(lessons):
+            if not lesson.final_content:
+                continue
+            d = _build_doc_sections(lesson)
+            prefix = _series_prefix(series, lesson, idx)
+            base = f"{prefix}-{_safe_name(d['title'])}"
+            ext_blocks = exercises_map.get(lesson.id, []) if include_exercises else []
+
+            if fmt == "txt":
+                text = _lesson_plain_text(d)
+                for blk in ext_blocks:
+                    text += "\n\n" + _render_exercises_text(blk)
+                zf.writestr(f"{base}.txt", text.encode("utf-8"))
+            elif fmt == "md":
+                text = _lesson_markdown(d)
+                for blk in ext_blocks:
+                    text += "\n\n" + _render_exercises_md(blk)
+                zf.writestr(f"{base}.md", text.encode("utf-8"))
+            elif fmt == "json":
+                payload = {
+                    "prefix": prefix,
+                    "sequence_order": lesson.sequence_order,
+                    "title": lesson.title,
+                    "final_content": _parse_fc(lesson.final_content),
+                }
+                if include_exercises:
+                    payload["exercises"] = ext_blocks
+                zf.writestr(
+                    f"{base}.json",
+                    json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default).encode("utf-8"),
+                )
+            elif fmt == "docx":
+                from docx import Document
+                from docx.shared import Pt
+                doc = Document()
+                st = doc.styles["Normal"]; st.font.size = Pt(11); st.font.name = "SimSun"
+                doc.add_heading(d["title"], level=0)
+                for k, v in d["meta"].items():
+                    p = doc.add_paragraph()
+                    rk = p.add_run(f"{k}: "); rk.bold = True
+                    p.add_run(str(v))
+                if d["full_optimized"]:
+                    doc.add_heading("优化教案", level=1)
+                    for line in d["full_optimized"].split("\n"):
+                        if line.strip():
+                            doc.add_paragraph(line.strip())
+                if d["full_draft"]:
+                    doc.add_heading("初步教案", level=1)
+                    for line in d["full_draft"].split("\n"):
+                        if line.strip():
+                            doc.add_paragraph(line.strip())
+                if d["stages"]:
+                    doc.add_heading("各环节详情", level=1)
+                    for s in d["stages"]:
+                        header = f"{s['model_name']} - {s['stage_name']}" if s["model_name"] else s["stage_name"]
+                        doc.add_heading(header, level=2)
+                        if s["expert"]:
+                            pp = doc.add_paragraph()
+                            run = pp.add_run(f"采纳专家: {s['expert']}"); run.italic = True
+                        for line in (s["content"] or s["draft"] or "").split("\n"):
+                            if line.strip():
+                                doc.add_paragraph(line.strip())
+                for blk in ext_blocks:
+                    _render_exercises_docx(doc, blk)
+                sub = BytesIO()
+                doc.save(sub)
+                zf.writestr(f"{base}.docx", sub.getvalue())
+            elif fmt == "pdf":
+                pdf_bytes = _build_pdf_bytes(d)
+                zf.writestr(f"{base}.pdf", pdf_bytes)
+                if ext_blocks:
+                    # attach exercises as a secondary pdf file in the zip
+                    from reportlab.lib.pagesizes import A4
+                    from reportlab.lib.styles import ParagraphStyle
+                    from reportlab.lib.units import cm
+                    from reportlab.platypus import SimpleDocTemplate
+                    _ensure_pdf_font()
+                    fn = _PDF_FONT_NAME
+                    S = {
+                        "h3": ParagraphStyle("H3", fontName=fn, fontSize=12, spaceBefore=10, spaceAfter=6, leading=18),
+                        "body": ParagraphStyle("B", fontName=fn, fontSize=10.5, leading=18, spaceAfter=3),
+                    }
+                    sub = BytesIO()
+                    pdoc = SimpleDocTemplate(
+                        sub, pagesize=A4,
+                        leftMargin=2 * cm, rightMargin=2 * cm, topMargin=2 * cm, bottomMargin=2 * cm,
+                    )
+                    elems = []
+                    for blk in ext_blocks:
+                        elems.extend(_render_exercises_pdf_elems(blk, S))
+                    if elems:
+                        pdoc.build(elems)
+                        zf.writestr(f"{base}-exercises.pdf", sub.getvalue())
+
+    buf.seek(0)
+    zip_title = f"{series.title or 'series'}_{fmt}"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": _content_disposition(zip_title, "zip")},
+    )

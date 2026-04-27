@@ -13,4 +13,8 @@ class CourseToolResult(Base):
     params = Column(JSON, default={})
     result = Column(JSON, default={})
     file_path = Column(Text, nullable=True)
+    # pending | running | completed | failed
+    status = Column(String(16), nullable=False, default="completed", server_default="completed", index=True)
+    error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

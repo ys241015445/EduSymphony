@@ -1,4 +1,6 @@
-FROM python:3.11-slim
+# 固定 -bookworm（Debian 12）：避免滚动 tag 跳到 trixie 后与下方阿里云
+# bookworm sources.list 不一致而回落到 deb.debian.org（国内连接极不稳定）
+FROM python:3.11-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -11,8 +13,11 @@ RUN echo "deb https://mirrors.aliyun.com/debian bookworm main contrib non-free n
     echo "deb https://mirrors.aliyun.com/debian bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
     echo "deb https://mirrors.aliyun.com/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list
 
+# pkg-config + libcairo2-dev 是 pycairo 源码编译必须（依赖链 xhtml2pdf → svglib
+# → rlpycairo → pycairo，PyPI 上没有 cp311 manylinux wheel 时会回退源码编译）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ curl \
+    pkg-config libcairo2-dev \
     fonts-wqy-zenhei \
     && rm -rf /var/lib/apt/lists/*
 
@@ -21,6 +26,13 @@ RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
     pip config set install.trusted-host mirrors.aliyun.com && \
     pip config set global.timeout 120 && \
     pip config set global.retries 5
+
+# 绝对保险层：先把 Postgres 异步驱动装上
+RUN pip install --no-cache-dir "asyncpg==0.30.0" "sqlalchemy[asyncio]==2.0.25" \
+      || pip install --no-cache-dir \
+           --index-url https://pypi.org/simple/ \
+           --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple/ \
+           "asyncpg==0.30.0" "sqlalchemy[asyncio]==2.0.25"
 
 COPY requirements.txt .
 # 带 fallback：阿里云镜像偶发抽风时自动切换到官方 PyPI
@@ -41,7 +53,10 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
   CMD curl -f http://localhost:8000/health || exit 1
 
-# ⚠️ 必须 --workers 1：本项目的任务队列（queue_manager）和 Socket.IO 会话
-# 都是进程内内存结构，多 worker 会导致队列分裂、进度推送错乱。
-# 并发能力靠 asyncio + 内部 MAX_CONCURRENT_TASKS 信号量扩容，不靠多进程。
+# 单容器建议 --workers 1：
+#   - 任务队列已迁移到 Supabase Postgres (queue_jobs 表)，支持多进程/多实例共享，
+#     所以理论上允许多 worker；但 Socket.IO 会话是进程内内存结构，多 worker 下
+#     progress_update / stream_chunk 事件会错失客户端连接所在的进程。
+#   - 扩容并发请优先调大 MAX_CONCURRENT_TASKS (单进程内 asyncio worker 池)
+#     或横向扩容多个实例（共享同一 Supabase 队列）。
 CMD ["uvicorn", "app.main:socket_app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

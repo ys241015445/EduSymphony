@@ -1,7 +1,6 @@
-version: "3.8"
-
 # EduSymphony 本地/开发双容器部署
 # 生产环境请使用 docker-compose.coolify.yml（单容器 + Nginx）
+# 注：Compose v2 已废弃顶层 `version` 字段，此处不再声明
 
 services:
   backend:
@@ -15,9 +14,26 @@ services:
     env_file:
       - .env
     environment:
-      # 关键：内存队列需要单 worker，这里通过环境变量提醒
-      # 实际 workers 数由 Dockerfile CMD 控制（固定为 1）
-      MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-5}
+      # ─── ⚠️ DEPRECATED：方舟 PPT 智能体 / Coze Bot 已从 _do_ppt 移除 ───
+      # PPT 生成已统一切换为「本地两阶段豆包深度生成 + python-pptx 渲染」，
+      # 只依赖 DOUBAO_API_KEY + DOUBAO_MODEL（在 .env 文件里）即可。
+      # 下面这几行保留只是为了不让老 .env 报 "undefined variable" 警告，
+      # 应用层不会真正读它们；想干净的话可以直接整段删掉。
+      DOUBAO_PPT_BOT_ID:         ${DOUBAO_PPT_BOT_ID:-}
+      DOUBAO_PPT_BOT_TIMEOUT:    ${DOUBAO_PPT_BOT_TIMEOUT:-180}
+      COZE_API_KEY:              ${COZE_API_KEY:-}
+      COZE_BOT_ID:               ${COZE_BOT_ID:-}
+      COZE_BASE_URL:             ${COZE_BASE_URL:-https://api.coze.cn}
+      COZE_PPT_TIMEOUT:          ${COZE_PPT_TIMEOUT:-300}
+      COZE_POLL_INTERVAL:        ${COZE_POLL_INTERVAL:-2.0}
+      # ─── Postgres-backed 持久化队列（支持重启恢复） ───
+      MAX_CONCURRENT_TASKS:      ${MAX_CONCURRENT_TASKS:-5}
+      MAX_PER_USER_TASKS:        ${MAX_PER_USER_TASKS:-3}
+      TASK_TIMEOUT_SEC:          ${TASK_TIMEOUT_SEC:-1200}
+      WORKER_LEASE_SEC:          ${WORKER_LEASE_SEC:-1800}
+      QUEUE_POLL_INTERVAL_MS:    ${QUEUE_POLL_INTERVAL_MS:-1000}
+      QUEUE_SWEEP_INTERVAL_SEC:  ${QUEUE_SWEEP_INTERVAL_SEC:-30}
+      QUEUE_GC_DAYS:             ${QUEUE_GC_DAYS:-7}
     volumes:
       - ./backend/database:/app/database
     restart: unless-stopped
