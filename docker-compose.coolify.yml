@@ -2,6 +2,11 @@
 # 单容器（前端 + 后端 + Nginx 内置反代 + Supervisor）
 # 数据库用外部 Supabase PostgreSQL，本容器只需文件存储卷
 # 注：Compose v2 已废弃顶层 `version` 字段，此处不再声明
+#
+# Use Docker Compose V2: `docker compose -f docker-compose.coolify.yml ...`
+# Root Dockerfile uses heredoc COPY — requires BuildKit (DOCKER_BUILDKIT=1 if needed).
+#
+# Secrets: repo-root `.env` from `.env.example`; do not commit credentials.
 
 services:
   app:

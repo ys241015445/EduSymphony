@@ -18,6 +18,7 @@ class User(Base):
     email = Column(String(100), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
     role = Column(String(20), default=UserRole.FREE.value)
+    access_level = Column(String(20), default="full", nullable=False)
     quota_remaining = Column(Integer, default=100)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

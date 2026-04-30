@@ -1,6 +1,6 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
-import { useParams, useNavigate, Link } from 'react-router-dom'
-import { useLessonStore } from '../stores/lessonStore'
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+import { useParams, useNavigate, Link, useSearchParams } from 'react-router-dom'
+import { useLessonStore, LessonsScope, scopeParams } from '../stores/lessonStore'
 import { useAuthStore } from '../stores/authStore'
 import { getSocket, joinLesson, leaveLesson } from '../services/socket'
 import { useT } from '../i18n/translations'
@@ -12,10 +12,11 @@ import AgentCard from '../components/lesson/AgentCard'
 import SectionPanel, { Section } from '../components/lesson/SectionPanel'
 import VoteResult from '../components/lesson/VoteResult'
 import AnnotationEditor from '../components/lesson/AnnotationEditor'
-import { ArrowLeft, FileText, Loader2, CheckCircle2, Clock, RefreshCw, Download, ChevronDown, FileType, X, Eye, Printer, BookOpen, Wrench } from 'lucide-react'
+import { ArrowLeft, FileText, Loader2, CheckCircle2, Clock, RefreshCw, Download, ChevronDown, FileType, X, Eye, Printer, BookOpen, Wrench, Zap, Sparkles, AlertCircle } from 'lucide-react'
 import StyledPdfModal from '../components/lesson/StyledPdfModal'
 import { useMaterialGenStore } from '../stores/materialGenStore'
 import { sanitizePreviewHtml } from '../utils/sanitizePreviewHtml'
+import { canUseCourseTools, parseAccessLevel } from '../lib/access'
 
 interface ActiveModel {
   key: string
@@ -52,8 +53,17 @@ interface StreamBuffer {
 export default function LessonProcess() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const forUserId = searchParams.get('for_user_id') || undefined
+  const lessonScope = useMemo<LessonsScope | undefined>(
+    () => (forUserId ? { for_user_id: forUserId } : undefined),
+    [forUserId],
+  )
+  const scopeQs = forUserId ? `?for_user_id=${encodeURIComponent(forUserId)}` : ''
   const T = useT()
-  const { currentLesson, fetchLesson, fetchDiscussions, discussions } = useLessonStore()
+  const user = useAuthStore((s) => s.user)
+  const showCourseTools = canUseCourseTools(parseAccessLevel(user?.access_level))
+  const { currentLesson, fetchLesson, fetchDiscussions, discussions, extendQuickLesson } = useLessonStore()
 
   const [sections, setSections] = useState<Section[]>([])
   const [activeSection, setActiveSection] = useState<string | null>(null)
@@ -81,6 +91,7 @@ export default function LessonProcess() {
   const [regeneratingDiscussions, setRegeneratingDiscussions] = useState<Set<string>>(new Set())
   const [regeneratingDraft, setRegeneratingDraft] = useState(false)
   const [regeneratingOptimized, setRegeneratingOptimized] = useState(false)
+  const [extendingQuick, setExtendingQuick] = useState(false)
 
   // Export dropdown
   const [showExportMenu, setShowExportMenu] = useState(false)
@@ -115,9 +126,9 @@ export default function LessonProcess() {
     setActiveVersion('draft')
     setModelRecText('')
     setModelRecStreaming(false)
-    fetchLesson(id)
-    fetchDiscussions(id)
-  }, [id, fetchLesson, fetchDiscussions])
+    fetchLesson(id, lessonScope)
+    fetchDiscussions(id, lessonScope)
+  }, [id, forUserId, fetchLesson, fetchDiscussions])
 
   // Derive material & styled PDF states from currentLesson.final_content
   const fc = currentLesson?.final_content || {}
@@ -151,11 +162,11 @@ export default function LessonProcess() {
     if (!id) return
     if (isComplete && !anyBgGenerating) return
     const interval = setInterval(() => {
-      fetchLesson(id)
-      if (!isComplete) fetchDiscussions(id)
+      fetchLesson(id, lessonScope)
+      if (!isComplete) fetchDiscussions(id, lessonScope)
     }, 3000)
     return () => clearInterval(interval)
-  }, [id, isComplete, anyBgGenerating, fetchLesson, fetchDiscussions])
+  }, [id, isComplete, anyBgGenerating, forUserId, fetchLesson, fetchDiscussions])
 
   // Derive active models from lesson data
   const activeModels: ActiveModel[] = (() => {
@@ -214,6 +225,7 @@ export default function LessonProcess() {
 
     if (fc?.stages) {
       const finalStages = fc.stages as Record<string, any>
+      const hasAnyStageContent = Object.values(finalStages).some((d: any) => d?.content)
       setSections((prev) =>
         prev.map((s, idx) => {
           const d = finalStages[s.key]
@@ -221,10 +233,6 @@ export default function LessonProcess() {
 
           if (d?.content) {
             return { ...s, status: 'done' as const, content: d.content, expert: d.expert }
-          }
-
-          if (lessonStatus === 'completed') {
-            return { ...s, status: 'done' as const }
           }
 
           if (lessonStatus === 'processing' && currentStage > 0) {
@@ -239,11 +247,14 @@ export default function LessonProcess() {
           return { ...s, status: s.status === 'processing' ? 'processing' : 'pending' as const }
         })
       )
+      if (lessonStatus === 'completed' && hasAnyStageContent) {
+        setIsComplete(true)
+      } else if (lessonStatus !== 'completed') {
+        setIsComplete(false)
+      }
     } else if (lessonStatus === 'processing' && !fc?.stages) {
       setSections((prev) => prev.map((s) => ({ ...s, status: 'pending' as const })))
-    }
-
-    if (lessonStatus === 'completed') {
+    } else if (lessonStatus === 'completed' && fc?.full_draft && !fc?.stages) {
       setIsComplete(true)
     }
   }, [currentLesson])
@@ -263,7 +274,7 @@ export default function LessonProcess() {
       }
 
       if (data.stage === 'awaiting_confirmation') {
-        fetchLesson(id!)
+        fetchLesson(id!, lessonScope)
       }
 
       if (data.stage === 'section_start') {
@@ -349,7 +360,7 @@ export default function LessonProcess() {
 
       if (data.phase === 'model_recommendation') {
         setModelRecStreaming(false)
-        fetchLesson(id)
+        fetchLesson(id, lessonScope)
       } else if (data.phase === 'full_draft') {
         setFullDraftText(data.full_text || '')
         setFullDraftStreaming(false)
@@ -376,7 +387,7 @@ export default function LessonProcess() {
 
     socket.on('all_drafts_ready', (data: any) => {
       if (data.lesson_id !== id) return
-      fetchLesson(id)
+      fetchLesson(id, lessonScope)
     })
 
     socket.on('discussion_update', (data: any) => {
@@ -397,23 +408,23 @@ export default function LessonProcess() {
     socket.on('lesson_completed', (data: any) => {
       if (data.lesson_id !== id) return
       setIsComplete(true)
-      fetchLesson(id)
-      fetchDiscussions(id)
+      fetchLesson(id, lessonScope)
+      fetchDiscussions(id, lessonScope)
     })
 
     socket.on('stage_regenerated', (data: any) => {
       if (data.lesson_id !== id) return
-      fetchLesson(id)
+      fetchLesson(id, lessonScope)
     })
 
     socket.on('votes_saved', (data: any) => {
       if (data.lesson_id !== id) return
-      fetchDiscussions(id)
+      fetchDiscussions(id, lessonScope)
     })
 
     socket.on('bg_task_complete', (data: any) => {
       if (data.lesson_id !== id) return
-      fetchLesson(id)
+      fetchLesson(id, lessonScope)
     })
 
     return () => {
@@ -429,7 +440,7 @@ export default function LessonProcess() {
       socket.off('votes_saved')
       socket.off('bg_task_complete')
     }
-  }, [id, fetchLesson, fetchDiscussions])
+  }, [id, fetchLesson, fetchDiscussions, forUserId])
 
   useEffect(() => {
     if (!currentLesson?.started_at) return
@@ -481,8 +492,10 @@ export default function LessonProcess() {
     }
 
     try {
-      await api.post(`/api/v1/lessons/${id}/discussions/${discussionId}/regenerate`)
-      await fetchDiscussions(id)
+      await api.post(`/api/v1/lessons/${id}/discussions/${discussionId}/regenerate`, null, {
+        params: scopeParams(lessonScope),
+      })
+      await fetchDiscussions(id, lessonScope)
     } catch (e) {
       console.error('Regenerate discussion failed:', e)
     } finally {
@@ -514,7 +527,7 @@ export default function LessonProcess() {
     setStageVotes({})
     setActiveVersion('draft')
     try {
-      await api.post(`/api/v1/lessons/${id}/regenerate-draft`)
+      await api.post(`/api/v1/lessons/${id}/regenerate-draft`, null, { params: scopeParams(lessonScope) })
     } catch (e) {
       console.error('Regenerate draft failed:', e)
       alert(T('process.regen_failed'))
@@ -530,12 +543,34 @@ export default function LessonProcess() {
     setFullOptimizedText('')
     setActiveVersion('optimized')
     try {
-      await api.post(`/api/v1/lessons/${id}/regenerate-optimized`)
+      await api.post(`/api/v1/lessons/${id}/regenerate-optimized`, null, { params: scopeParams(lessonScope) })
     } catch (e) {
       console.error('Regenerate optimized failed:', e)
       alert(T('process.optimize_failed'))
     } finally {
       setRegeneratingOptimized(false)
+    }
+  }
+
+  const handleExtendQuick = async () => {
+    if (!id || extendingQuick) return
+    if (!confirm(T('process.confirm_extend_quick'))) return
+    setExtendingQuick(true)
+    setIsComplete(false)
+    setFullDraftText('')
+    setFullOptimizedText('')
+    setSections(buildAllSections())
+    setStreamBuffers({})
+    setStreamingContent({})
+    setStageVotes({})
+    setActiveVersion('draft')
+    try {
+      await extendQuickLesson(id, lessonScope)
+    } catch (e) {
+      console.error('Extend quick lesson failed:', e)
+      alert(T('process.extend_failed'))
+    } finally {
+      setExtendingQuick(false)
     }
   }
 
@@ -564,7 +599,11 @@ export default function LessonProcess() {
     setShowExportMenu(false)
     try {
       const token = useAuthStore.getState().token
-      const res = await fetch(`/api/v1/export/${format}/${id}`, {
+      let exportUrl = `/api/v1/export/${format}/${id}`
+      if (forUserId) {
+        exportUrl += `?for_user_id=${encodeURIComponent(forUserId)}`
+      }
+      const res = await fetch(exportUrl, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       })
       if (!res.ok) {
@@ -619,13 +658,22 @@ export default function LessonProcess() {
   const draftStatus = fullDraftStreaming ? 'streaming' : fullDraftText ? 'done' : 'pending'
   const optimizedStatus = fullOptimizedStreaming ? 'streaming' : fullOptimizedText ? 'done' : 'pending'
 
+  const lessonMode = (currentLesson?.mode as string | undefined) || (fc.mode as string | undefined) || 'full_auto'
+  const isQuickMode = lessonMode === 'quick'
+  const lessonStatusVal = currentLesson?.status
+  const isQuickCompleted =
+    isQuickMode &&
+    lessonStatusVal === 'completed' &&
+    !fc.full_optimized &&
+    (!fc.stages || Object.keys(fc.stages).length === 0)
+
   return (
     <div className="h-screen bg-gray-50 flex flex-col overflow-hidden">
       {/* Top bar — fixed height, never scrolls */}
       <div className="flex-shrink-0 bg-white border-b border-gray-200 z-50">
         <div className="max-w-[1800px] mx-auto px-6 h-14 flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <button onClick={() => navigate('/dashboard')} className="text-gray-400 hover:text-gray-600 transition-colors">
+            <button onClick={() => navigate(scopeQs ? `/dashboard${scopeQs}` : '/dashboard')} className="text-gray-400 hover:text-gray-600 transition-colors">
               <ArrowLeft className="w-5 h-5" />
             </button>
             <div className="flex items-center gap-2">
@@ -669,18 +717,20 @@ export default function LessonProcess() {
           </div>
 
           <div className="flex items-center gap-4">
-            <Link to={`/course-tools/${id}`}>
-              <Button variant="ghost" size="sm" className="!text-teal-600 hover:!bg-teal-50">
-                <Wrench className="w-4 h-4 mr-1" />
-                {T('tools.title')}
-              </Button>
-            </Link>
+            {showCourseTools && (
+              <Link to={`/course-tools/${id}${scopeQs}`}>
+                <Button variant="ghost" size="sm" className="!text-teal-600 hover:!bg-teal-50">
+                  <Wrench className="w-4 h-4 mr-1" />
+                  {T('tools.title')}
+                </Button>
+              </Link>
+            )}
             <div className="flex items-center gap-2 text-sm text-gray-500">
               <Clock className="w-4 h-4 text-gray-400" />
               <span className="text-gray-500 font-mono">{formatElapsed(elapsedSeconds)}</span>
             </div>
             {isComplete ? (
-              <Link to={`/lesson/${id}/result`}>
+              <Link to={`/lesson/${id}/result${scopeQs}`}>
                 <Button size="sm">
                   <CheckCircle2 className="w-4 h-4 mr-1.5" />
                   {T('process.view_result')}
@@ -690,8 +740,8 @@ export default function LessonProcess() {
               <Button size="sm" onClick={async () => {
                 if (!id) return
                 try {
-                  await api.post(`/api/v1/lessons/${id}/confirm-step`)
-                  fetchLesson(id)
+                  await api.post(`/api/v1/lessons/${id}/confirm-step`, null, { params: scopeParams(lessonScope) })
+                  fetchLesson(id, lessonScope)
                 } catch (e) { console.error('Confirm step failed:', e) }
               }}>
                 <CheckCircle2 className="w-4 h-4 mr-1.5" />
@@ -706,6 +756,25 @@ export default function LessonProcess() {
           </div>
         </div>
       </div>
+
+      {/* Quick mode banner */}
+      {isQuickCompleted && (
+        <div className="flex-shrink-0 bg-amber-50 border-b border-amber-200">
+          <div className="max-w-[1800px] mx-auto px-6 py-2 flex items-center gap-3">
+            <Zap className="w-4 h-4 text-amber-600 flex-shrink-0" />
+            <span className="text-xs text-amber-800 flex-1">{T('process.quick_banner')}</span>
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={extendingQuick}
+              onClick={handleExtendQuick}
+            >
+              <Sparkles className={`w-3.5 h-3.5 mr-1 ${extendingQuick ? 'animate-spin' : ''}`} />
+              {extendingQuick ? T('process.extending') : T('process.extend_to_full')}
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* Main content: 2 columns — takes all remaining height */}
       <div className="flex-1 flex min-h-0">
@@ -878,7 +947,8 @@ export default function LessonProcess() {
                       <AnnotationEditor
                         lessonId={id!}
                         sectionKey={activeSection}
-                        onSubmitted={() => fetchLesson(id!)}
+                        forUserId={forUserId}
+                        onSubmitted={() => fetchLesson(id!, lessonScope)}
                       />
                     </div>
                   )}
@@ -1198,10 +1268,44 @@ export default function LessonProcess() {
                           <span className="text-sm text-center max-w-sm">{T('process.waiting_draft')}</span>
                         </>
                       ) : activeVersion === 'optimized' && !fullOptimizedText ? (
-                        <>
-                          <Clock className="w-8 h-8 mb-3" />
-                          <span className="text-sm text-center max-w-sm">{T('process.waiting_optimized')}</span>
-                        </>
+                        isQuickCompleted ? (
+                          <>
+                            <Zap className="w-8 h-8 mb-3 text-amber-500" />
+                            <span className="text-sm text-center max-w-sm mb-4 text-gray-600">
+                              {T('process.optimized_quick_hint')}
+                            </span>
+                            <Button
+                              variant="primary"
+                              size="sm"
+                              disabled={extendingQuick}
+                              onClick={handleExtendQuick}
+                            >
+                              <Sparkles className={`w-4 h-4 mr-1.5 ${extendingQuick ? 'animate-spin' : ''}`} />
+                              {extendingQuick ? T('process.extending') : T('process.extend_to_full')}
+                            </Button>
+                          </>
+                        ) : fullDraftText && !regeneratingOptimized && lessonStatusVal !== 'processing' ? (
+                          <>
+                            <Sparkles className="w-8 h-8 mb-3 text-brand-400" />
+                            <span className="text-sm text-center max-w-sm mb-4 text-gray-600">
+                              {T('process.optimized_manual_hint')}
+                            </span>
+                            <Button
+                              variant="primary"
+                              size="sm"
+                              disabled={regeneratingOptimized}
+                              onClick={handleRegenerateOptimized}
+                            >
+                              <RefreshCw className={`w-4 h-4 mr-1.5 ${regeneratingOptimized ? 'animate-spin' : ''}`} />
+                              {regeneratingOptimized ? T('process.regenerating') : T('process.generate_optimized_now')}
+                            </Button>
+                          </>
+                        ) : (
+                          <>
+                            <Loader2 className="w-8 h-8 animate-spin mb-3 text-brand-400" />
+                            <span className="text-sm text-center max-w-sm">{T('process.waiting_optimized')}</span>
+                          </>
+                        )
                       ) : null}
                     </div>
                   </Card>

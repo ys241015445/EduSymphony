@@ -1,26 +1,64 @@
-from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile
-from fastapi.responses import Response, StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile, Query
+from fastapi.responses import Response, StreamingResponse, FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from urllib.parse import quote
-from datetime import datetime, date
+from datetime import datetime, date, timedelta, timezone
 from io import BytesIO
 from typing import Optional
 from pydantic import BaseModel
 import asyncio
 import json
 import os
+import uuid
 import tempfile
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
 
 from app.core.config import settings
-from app.core.deps import get_db, get_current_active_user
+from app.core.deps import get_db, get_current_active_user, resolve_documents_owner
 from app.core.database import async_session_maker
 from app.models.user import User
-from app.models.lesson import LessonPlan, LessonSeries
+from app.models.lesson import LessonPlan, LessonSeries, DocumentVersion, ExportRecord
 
 router = APIRouter(prefix="/export", tags=["导出"])
+
+# ───────────────────────────────────────────────────────────────────
+# 同步渲染器并发控制：PDF / DOCX 渲染会阻塞事件循环，扔到线程池跑
+# 用 Semaphore 限制最大并行渲染数，避免单机 OOM
+# ───────────────────────────────────────────────────────────────────
+def _env_int(key: str, default: int, lo: int = 1, hi: int = 64) -> int:
+    try:
+        return max(lo, min(hi, int(os.getenv(key, default))))
+    except Exception:
+        return default
+
+
+_PDF_RENDER_LIMIT = _env_int("PDF_RENDER_LIMIT", 3, 1, 16)
+_render_semaphore = asyncio.Semaphore(_PDF_RENDER_LIMIT)
+_render_executor = ThreadPoolExecutor(max_workers=_PDF_RENDER_LIMIT, thread_name_prefix="pdf-render")
+
+
+async def run_in_executor(fn, *args, **kwargs):
+    """Run blocking renderer in dedicated thread pool with concurrency cap."""
+    loop = asyncio.get_running_loop()
+    async with _render_semaphore:
+        if kwargs:
+            from functools import partial
+            fn = partial(fn, *args, **kwargs)
+            return await loop.run_in_executor(_render_executor, fn)
+        return await loop.run_in_executor(_render_executor, fn, *args)
+
+
+# ───────────────────────────────────────────────────────────────────
+# 临时缓存目录（系列/批量异步导出产物）
+# 由 supervisor / job_handlers 在启动后周期性清理过期文件
+# ───────────────────────────────────────────────────────────────────
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+TMP_EXPORTS_DIR = os.path.join(_BACKEND_DIR, "storage", "tmp_exports")
+os.makedirs(TMP_EXPORTS_DIR, exist_ok=True)
+TMP_EXPORTS_TTL_HOURS = _env_int("TMP_EXPORTS_TTL_HOURS", 168, 1, 24 * 30)  # 默认 7 天
 
 DEFAULT_TEMPLATE_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
@@ -51,9 +89,9 @@ def _content_disposition(title: str, ext: str) -> str:
         return f"attachment; filename=\"{ascii_fallback}.{ext}\""
 
 
-async def _get_user_lesson(lesson_id: str, db: AsyncSession, user: User) -> LessonPlan:
+async def _get_owner_lesson(lesson_id: str, db: AsyncSession, owner: User) -> LessonPlan:
     result = await db.execute(
-        select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == user.id)
+        select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == owner.id)
     )
     lesson = result.scalar_one_or_none()
     if not lesson:
@@ -61,6 +99,87 @@ async def _get_user_lesson(lesson_id: str, db: AsyncSession, user: User) -> Less
     if not lesson.final_content:
         raise HTTPException(status_code=400, detail="教案尚未生成完成")
     return lesson
+
+
+async def _get_owner_version(
+    version_id: str,
+    db: AsyncSession,
+    owner: User,
+    lesson_id: Optional[str] = None,
+) -> DocumentVersion:
+    res = await db.execute(
+        select(DocumentVersion).where(
+            DocumentVersion.id == version_id,
+            DocumentVersion.user_id == owner.id,
+        )
+    )
+    v = res.scalar_one_or_none()
+    if not v:
+        raise HTTPException(status_code=404, detail="文档版本不存在")
+    if lesson_id and v.lesson_plan_id and v.lesson_plan_id != lesson_id:
+        raise HTTPException(status_code=400, detail="版本与教案不匹配")
+    return v
+
+
+async def _record_export_safely(
+    db: AsyncSession,
+    user_id: str,
+    *,
+    lesson_plan_id: Optional[str] = None,
+    version_id: Optional[str] = None,
+    format: str,
+    file_name: str,
+    file_size: Optional[int] = None,
+    file_path: Optional[str] = None,
+    job_id: Optional[str] = None,
+    expires_at: Optional[datetime] = None,
+    source_kind: str = "lesson",
+    status: str = "done",
+    params: Optional[dict] = None,
+) -> Optional[ExportRecord]:
+    """
+    插入 ExportRecord；任何异常都被吞掉（导出本身已成功，不能因为 record 失败就 500）。
+    返回新建的 record（异步流程会用到 record.id）。
+    """
+    try:
+        rec = ExportRecord(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            lesson_plan_id=lesson_plan_id,
+            version_id=version_id,
+            format=format,
+            file_name=file_name,
+            file_size=file_size,
+            file_path=file_path,
+            job_id=job_id,
+            expires_at=expires_at,
+            source_kind=source_kind,
+            status=status,
+            params=params,
+        )
+        db.add(rec)
+        await db.commit()
+        await db.refresh(rec)
+        return rec
+    except Exception as e:
+        logger.warning(f"_record_export_safely failed (non-fatal): {e}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return None
+
+
+def _markdown_to_doc_sections(version: DocumentVersion, lesson_title: Optional[str] = None) -> dict:
+    """Convert a DocumentVersion's markdown content into the legacy 'd' dict shape."""
+    title = lesson_title or version.title or "教案"
+    return {
+        "title": title,
+        "meta": {},
+        "full_optimized": version.content_markdown or "",
+        "full_draft": "",
+        "stages": [],
+    }
 
 
 def _parse_fc(fc):
@@ -80,32 +199,63 @@ def _parse_fc(fc):
 @router.get("/json/{lesson_id}")
 async def export_json(
     lesson_id: str,
+    version_id: Optional[str] = Query(None, description="导出指定 DocumentVersion 的 JSON 元数据"),
+    for_user_id: Optional[str] = Query(None, description="管理员：代导出指定用户的资源"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
     try:
-        lesson = await _get_user_lesson(lesson_id, db, current_user)
-        fc = _parse_fc(lesson.final_content)
-
-        export_data = {
-            "title": lesson.title,
-            "subject": lesson.subject,
-            "grade_level": lesson.grade_level,
-            "topic": getattr(lesson, "topic", None) or None,
-            "student_type": getattr(lesson, "student_type", None) or None,
-            "region": getattr(lesson, "region", None) or None,
-            "status": lesson.status,
-            "created_at": str(lesson.created_at) if lesson.created_at else None,
-            "completed_at": str(lesson.completed_at) if lesson.completed_at else None,
-            "final_content": fc,
-        }
+        lesson = await _get_owner_lesson(lesson_id, db, owner)
+        ver = None
+        if version_id:
+            ver = await _get_owner_version(version_id, db, owner, lesson_id)
+            export_data = {
+                "title": ver.title,
+                "lesson_plan_id": lesson.id,
+                "lesson_title": lesson.title,
+                "subject": lesson.subject,
+                "grade_level": lesson.grade_level,
+                "version_id": ver.id,
+                "version_number": ver.version_number,
+                "source_kind": ver.source_kind,
+                "change_source": ver.change_source,
+                "created_at": str(ver.created_at) if ver.created_at else None,
+                "content_markdown": ver.content_markdown,
+            }
+            file_title = ver.title or lesson.title
+        else:
+            fc = _parse_fc(lesson.final_content)
+            export_data = {
+                "title": lesson.title,
+                "subject": lesson.subject,
+                "grade_level": lesson.grade_level,
+                "topic": getattr(lesson, "topic", None) or None,
+                "student_type": getattr(lesson, "student_type", None) or None,
+                "region": getattr(lesson, "region", None) or None,
+                "status": lesson.status,
+                "created_at": str(lesson.created_at) if lesson.created_at else None,
+                "completed_at": str(lesson.completed_at) if lesson.completed_at else None,
+                "final_content": fc,
+            }
+            file_title = lesson.title
 
         json_str = json.dumps(export_data, ensure_ascii=False, indent=2, default=_json_default)
+        body = json_str.encode("utf-8")
+
+        await _record_export_safely(
+            db, owner.id,
+            lesson_plan_id=lesson_id,
+            version_id=ver.id if ver else None,
+            format="json",
+            file_name=f"{file_title}.json",
+            file_size=len(body),
+        )
 
         return Response(
-            content=json_str.encode("utf-8"),
+            content=body,
             media_type="application/json; charset=utf-8",
-            headers={"Content-Disposition": _content_disposition(lesson.title, "json")},
+            headers={"Content-Disposition": _content_disposition(file_title, "json")},
         )
     except HTTPException:
         raise
@@ -117,11 +267,34 @@ async def export_json(
 @router.get("/txt/{lesson_id}")
 async def export_txt(
     lesson_id: str,
+    version_id: Optional[str] = Query(None, description="导出指定 DocumentVersion 的 markdown 内容"),
+    for_user_id: Optional[str] = Query(None, description="管理员：代导出指定用户的资源"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
     try:
-        lesson = await _get_user_lesson(lesson_id, db, current_user)
+        lesson = await _get_owner_lesson(lesson_id, db, owner)
+        ver = None
+        if version_id:
+            ver = await _get_owner_version(version_id, db, owner, lesson_id)
+            text_body = ver.content_markdown or ""
+            file_title = ver.title or lesson.title
+            body = text_body.encode("utf-8")
+            await _record_export_safely(
+                db, owner.id,
+                lesson_plan_id=lesson_id,
+                version_id=ver.id,
+                format="txt",
+                file_name=f"{file_title}.txt",
+                file_size=len(body),
+            )
+            return Response(
+                content=body,
+                media_type="text/plain; charset=utf-8",
+                headers={"Content-Disposition": _content_disposition(file_title, "txt")},
+            )
+
         fc = _parse_fc(lesson.final_content)
 
         lines = []
@@ -189,9 +362,19 @@ async def export_txt(
         text = "\n".join(lines)
         if not text.strip():
             text = json.dumps(fc, ensure_ascii=False, indent=2, default=_json_default)
+        body = text.encode("utf-8")
+
+        await _record_export_safely(
+            db, owner.id,
+            lesson_plan_id=lesson_id,
+            version_id=None,
+            format="txt",
+            file_name=f"{title}.txt",
+            file_size=len(body),
+        )
 
         return Response(
-            content=text.encode("utf-8"),
+            content=body,
             media_type="text/plain; charset=utf-8",
             headers={"Content-Disposition": _content_disposition(title, "txt")},
         )
@@ -250,11 +433,32 @@ def _build_doc_sections(lesson: LessonPlan) -> dict:
 @router.get("/markdown/{lesson_id}")
 async def export_markdown(
     lesson_id: str,
+    version_id: Optional[str] = Query(None, description="导出指定 DocumentVersion 的 markdown 原文"),
+    for_user_id: Optional[str] = Query(None, description="管理员：代导出指定用户的资源"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
     try:
-        lesson = await _get_user_lesson(lesson_id, db, current_user)
+        lesson = await _get_owner_lesson(lesson_id, db, owner)
+        if version_id:
+            ver = await _get_owner_version(version_id, db, owner, lesson_id)
+            md_body = (ver.content_markdown or "").encode("utf-8")
+            file_title = ver.title or lesson.title
+            await _record_export_safely(
+                db, owner.id,
+                lesson_plan_id=lesson_id,
+                version_id=ver.id,
+                format="markdown",
+                file_name=f"{file_title}.md",
+                file_size=len(md_body),
+            )
+            return Response(
+                content=md_body,
+                media_type="text/markdown; charset=utf-8",
+                headers={"Content-Disposition": _content_disposition(file_title, "md")},
+            )
+
         d = _build_doc_sections(lesson)
 
         lines = [f"# {d['title']}", ""]
@@ -287,8 +491,17 @@ async def export_markdown(
                 lines.append("")
 
         md_text = "\n".join(lines)
+        body = md_text.encode("utf-8")
+        await _record_export_safely(
+            db, owner.id,
+            lesson_plan_id=lesson_id,
+            version_id=None,
+            format="markdown",
+            file_name=f"{d['title']}.md",
+            file_size=len(body),
+        )
         return Response(
-            content=md_text.encode("utf-8"),
+            content=body,
             media_type="text/markdown; charset=utf-8",
             headers={"Content-Disposition": _content_disposition(d["title"], "md")},
         )
@@ -299,77 +512,99 @@ async def export_markdown(
         raise HTTPException(status_code=500, detail=f"导出失败: {str(e)}")
 
 
+def _build_docx_bytes(d: dict) -> bytes:
+    """Build DOCX from structured lesson data; returns raw bytes (blocking — call via run_in_executor)."""
+    from docx import Document
+    from docx.shared import Pt
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+    style = doc.styles["Normal"]
+    style.font.size = Pt(11)
+    style.font.name = "SimSun"
+
+    title_para = doc.add_heading(d["title"], level=0)
+    title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    for k, v in d["meta"].items():
+        p = doc.add_paragraph()
+        run_key = p.add_run(f"{k}: ")
+        run_key.bold = True
+        run_key.font.size = Pt(11)
+        run_val = p.add_run(str(v))
+        run_val.font.size = Pt(11)
+
+    doc.add_paragraph("")
+
+    if d["full_optimized"]:
+        doc.add_heading("优化教案", level=1)
+        for para_text in d["full_optimized"].split("\n"):
+            if para_text.strip():
+                p = doc.add_paragraph(para_text.strip())
+                p.paragraph_format.space_after = Pt(4)
+        doc.add_paragraph("")
+
+    if d["full_draft"]:
+        doc.add_heading("初步教案", level=1)
+        for para_text in d["full_draft"].split("\n"):
+            if para_text.strip():
+                p = doc.add_paragraph(para_text.strip())
+                p.paragraph_format.space_after = Pt(4)
+        doc.add_paragraph("")
+
+    if d["stages"]:
+        doc.add_heading("各环节详情", level=1)
+        for s in d["stages"]:
+            header = f"{s['model_name']} - {s['stage_name']}" if s["model_name"] else s["stage_name"]
+            doc.add_heading(header, level=2)
+            if s["expert"]:
+                p = doc.add_paragraph()
+                run = p.add_run(f"采纳专家: {s['expert']}")
+                run.italic = True
+                run.font.size = Pt(10)
+            content = s["content"] or s["draft"] or ""
+            for para_text in content.split("\n"):
+                if para_text.strip():
+                    p = doc.add_paragraph(para_text.strip())
+                    p.paragraph_format.space_after = Pt(4)
+
+    buf = BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
 @router.get("/docx/{lesson_id}")
 async def export_docx(
     lesson_id: str,
+    version_id: Optional[str] = Query(None, description="导出指定 DocumentVersion 的 markdown 内容"),
+    for_user_id: Optional[str] = Query(None, description="管理员：代导出指定用户的资源"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
     try:
-        from docx import Document
-        from docx.shared import Pt, Inches
-        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        lesson = await _get_owner_lesson(lesson_id, db, owner)
+        if version_id:
+            ver = await _get_owner_version(version_id, db, owner, lesson_id)
+            d = _markdown_to_doc_sections(ver, lesson_title=lesson.title)
+        else:
+            ver = None
+            d = _build_doc_sections(lesson)
 
-        lesson = await _get_user_lesson(lesson_id, db, current_user)
-        d = _build_doc_sections(lesson)
+        docx_bytes = await run_in_executor(_build_docx_bytes, d)
+        file_name = f"{d['title']}.docx"
 
-        doc = Document()
-
-        style = doc.styles["Normal"]
-        style.font.size = Pt(11)
-        style.font.name = "SimSun"
-
-        title_para = doc.add_heading(d["title"], level=0)
-        title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-        for k, v in d["meta"].items():
-            p = doc.add_paragraph()
-            run_key = p.add_run(f"{k}: ")
-            run_key.bold = True
-            run_key.font.size = Pt(11)
-            run_val = p.add_run(str(v))
-            run_val.font.size = Pt(11)
-
-        doc.add_paragraph("")
-
-        if d["full_optimized"]:
-            doc.add_heading("优化教案", level=1)
-            for para_text in d["full_optimized"].split("\n"):
-                if para_text.strip():
-                    p = doc.add_paragraph(para_text.strip())
-                    p.paragraph_format.space_after = Pt(4)
-            doc.add_paragraph("")
-
-        if d["full_draft"]:
-            doc.add_heading("初步教案", level=1)
-            for para_text in d["full_draft"].split("\n"):
-                if para_text.strip():
-                    p = doc.add_paragraph(para_text.strip())
-                    p.paragraph_format.space_after = Pt(4)
-            doc.add_paragraph("")
-
-        if d["stages"]:
-            doc.add_heading("各环节详情", level=1)
-            for s in d["stages"]:
-                header = f"{s['model_name']} - {s['stage_name']}" if s["model_name"] else s["stage_name"]
-                doc.add_heading(header, level=2)
-                if s["expert"]:
-                    p = doc.add_paragraph()
-                    run = p.add_run(f"采纳专家: {s['expert']}")
-                    run.italic = True
-                    run.font.size = Pt(10)
-                content = s["content"] or s["draft"] or ""
-                for para_text in content.split("\n"):
-                    if para_text.strip():
-                        p = doc.add_paragraph(para_text.strip())
-                        p.paragraph_format.space_after = Pt(4)
-
-        buf = BytesIO()
-        doc.save(buf)
-        buf.seek(0)
+        await _record_export_safely(
+            db, owner.id,
+            lesson_plan_id=lesson_id,
+            version_id=ver.id if ver else None,
+            format="docx",
+            file_name=file_name,
+            file_size=len(docx_bytes),
+        )
 
         return Response(
-            content=buf.getvalue(),
+            content=docx_bytes,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             headers={"Content-Disposition": _content_disposition(d["title"], "docx")},
         )
@@ -513,13 +748,32 @@ def _build_pdf_bytes(d: dict) -> bytes:
 @router.get("/pdf/{lesson_id}")
 async def export_pdf(
     lesson_id: str,
+    version_id: Optional[str] = Query(None, description="导出指定 DocumentVersion 的 markdown 内容"),
+    for_user_id: Optional[str] = Query(None, description="管理员：代导出指定用户的资源"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
     try:
-        lesson = await _get_user_lesson(lesson_id, db, current_user)
-        d = _build_doc_sections(lesson)
-        pdf_bytes = _build_pdf_bytes(d)
+        lesson = await _get_owner_lesson(lesson_id, db, owner)
+        if version_id:
+            ver = await _get_owner_version(version_id, db, owner, lesson_id)
+            d = _markdown_to_doc_sections(ver, lesson_title=lesson.title)
+        else:
+            ver = None
+            d = _build_doc_sections(lesson)
+
+        pdf_bytes = await run_in_executor(_build_pdf_bytes, d)
+        file_name = f"{d['title']}.pdf"
+
+        await _record_export_safely(
+            db, owner.id,
+            lesson_plan_id=lesson_id,
+            version_id=ver.id if ver else None,
+            format="pdf",
+            file_name=file_name,
+            file_size=len(pdf_bytes),
+        )
 
         return Response(
             content=pdf_bytes,
@@ -626,11 +880,13 @@ async def generate_styled_pdf_html(
     template_type: str = Form("default"),
     template_file: Optional[UploadFile] = File(None),
     content_version: str = Form("draft"),
+    for_user_id: Optional[str] = Query(None, description="管理员：代指定用户入队任务"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """Start background task to generate styled PDF HTML, result saved to final_content."""
-    lesson = await _get_user_lesson(lesson_id, db, current_user)
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    lesson = await _get_owner_lesson(lesson_id, db, owner)
     fc = _parse_fc(lesson.final_content)
 
     if content_version == "optimized":
@@ -664,13 +920,24 @@ async def generate_styled_pdf_html(
         "严格按范本格式结构排版，生成完整HTML代码。"
     )
 
-    fc = {**fc, "styled_pdf_status": "generating", "styled_pdf_content_version": content_version}
+    fc = {
+        **fc,
+        "styled_pdf_status": "generating",
+        "styled_pdf_content_version": content_version,
+        "styled_pdf_prompt": prompt,
+    }
     fc.pop("styled_pdf_error", None)
     lesson.final_content = fc
     await db.commit()
 
-    asyncio.create_task(_bg_generate_styled_pdf(lesson_id, prompt))
-    return {"status": "started", "message": "排版PDF生成已启动"}
+    from app.tasks.queue_manager import enqueue
+    await enqueue(
+        target_id=lesson_id,
+        kind="styled_pdf",
+        user_id=owner.id,
+        max_attempts=2,
+    )
+    return {"status": "queued", "message": "排版PDF生成任务已入队"}
 
 
 _MATERIAL_GEN_SYSTEM = """你是一位专业的课程材料制作老师，擅长将教学知识点转换为互动式、美观的HTML演示页面。你会生成完整的、可直接运行的HTML代码，包含现代化的CSS样式和交互式JavaScript功能。"""
@@ -680,11 +947,13 @@ _MATERIAL_GEN_SYSTEM = """你是一位专业的课程材料制作老师，擅长
 async def generate_course_material_html(
     lesson_id: str,
     content_version: str = Form("draft"),
+    for_user_id: Optional[str] = Query(None, description="管理员：代指定用户入队任务"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """Start background task to generate interactive HTML course material, result saved to final_content."""
-    lesson = await _get_user_lesson(lesson_id, db, current_user)
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    lesson = await _get_owner_lesson(lesson_id, db, owner)
     fc = _parse_fc(lesson.final_content)
 
     if content_version == "optimized":
@@ -749,13 +1018,20 @@ async def generate_course_material_html(
 
     status_key = f"material_{content_version}_status"
     error_key = f"material_{content_version}_error"
-    fc = {**fc, status_key: "generating"}
+    prompt_key = f"material_{content_version}_prompt"
+    fc = {**fc, status_key: "generating", prompt_key: prompt}
     fc.pop(error_key, None)
     lesson.final_content = fc
     await db.commit()
 
-    asyncio.create_task(_bg_generate_material(lesson_id, content_version, prompt))
-    return {"status": "started", "message": "教学材料生成已启动"}
+    from app.tasks.queue_manager import enqueue
+    await enqueue(
+        target_id=lesson_id,
+        kind=f"material_{content_version}",
+        user_id=owner.id,
+        max_attempts=2,
+    )
+    return {"status": "queued", "message": "教学材料生成任务已入队"}
 
 
 # ---------------------------------------------------------------------------
@@ -780,6 +1056,49 @@ async def _bg_update_fc(lesson_id: str, updates: dict):
         fc = {**_parse_fc(lesson.final_content), **updates}
         lesson.final_content = fc
         await session.commit()
+
+
+async def run_styled_pdf_job(lesson_id: str):
+    """`kind=styled_pdf` queue handler：从 lesson.final_content.styled_pdf_prompt 还原任务参数。"""
+    async with async_session_maker() as session:
+        res = await session.execute(select(LessonPlan).where(LessonPlan.id == lesson_id))
+        lesson = res.scalar_one_or_none()
+    if not lesson:
+        logger.warning(f"[styled_pdf] lesson not found: {lesson_id}")
+        return
+    fc = _parse_fc(lesson.final_content)
+    prompt = fc.get("styled_pdf_prompt") or ""
+    if not prompt:
+        await _bg_update_fc(lesson_id, {
+            "styled_pdf_status": "error",
+            "styled_pdf_error": "任务参数缺失：styled_pdf_prompt 为空",
+        })
+        return
+    await _bg_generate_styled_pdf(lesson_id, prompt)
+
+
+async def run_material_job(lesson_id: str):
+    """`kind=material_*` queue handler。Lesson 中保存了 material_<version>_prompt。"""
+    async with async_session_maker() as session:
+        res = await session.execute(select(LessonPlan).where(LessonPlan.id == lesson_id))
+        lesson = res.scalar_one_or_none()
+    if not lesson:
+        logger.warning(f"[material] lesson not found: {lesson_id}")
+        return
+    fc = _parse_fc(lesson.final_content)
+    # 找还在 generating 的 version
+    for v in ("draft", "optimized"):
+        if fc.get(f"material_{v}_status") == "generating":
+            prompt = fc.get(f"material_{v}_prompt") or ""
+            if not prompt:
+                await _bg_update_fc(lesson_id, {
+                    f"material_{v}_status": "error",
+                    f"material_{v}_error": "任务参数缺失：material_*_prompt 为空",
+                })
+                return
+            await _bg_generate_material(lesson_id, v, prompt)
+            return
+    logger.info(f"[material] no generating version for lesson {lesson_id}; skipping")
 
 
 async def _bg_generate_styled_pdf(lesson_id: str, prompt: str):
@@ -1194,23 +1513,25 @@ async def export_series_merged(
     series_id: str,
     format: str = "docx",
     include_exercises: bool = False,
+    for_user_id: Optional[str] = Query(None, description="管理员：代导出指定用户的系列"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """Merge all lessons in a series into a single file (docx/pdf/md/txt/json)."""
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
     fmt = (format or "docx").lower()
     if fmt not in ALLOWED_SERIES_FORMATS:
         raise HTTPException(status_code=400, detail=f"不支持的格式：{fmt}")
 
     try:
-        series, lessons = await _load_series_lessons(series_id, db, current_user)
+        series, lessons = await _load_series_lessons(series_id, db, owner)
     except HTTPException:
         raise
 
     lesson_ids = [l.id for l in lessons]
     exercises_map: dict[str, list[dict]] = {}
     if include_exercises:
-        exercises_map = await _fetch_exercises_for_lessons(db, current_user.id, lesson_ids)
+        exercises_map = await _fetch_exercises_for_lessons(db, owner.id, lesson_ids)
 
     built = []
     for idx, lesson in enumerate(lessons):
@@ -1224,6 +1545,8 @@ async def export_series_merged(
         raise HTTPException(status_code=400, detail="系列中没有任何已完成的教案")
 
     series_title = series.title or "系列教案"
+
+    bundle_params = {"series_id": series_id, "format": fmt, "include_exercises": include_exercises, "type": "merged"}
 
     if fmt == "json":
         payload = {
@@ -1250,8 +1573,14 @@ async def export_series_merged(
                 item["exercises"] = exercises_map.get(b["lesson"].id, [])
             payload["lessons"].append(item)
         text = json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default)
+        body = text.encode("utf-8")
+        await _record_export_safely(
+            db, owner.id, lesson_plan_id=None, version_id=None,
+            format="json", file_name=f"{series_title}.json",
+            file_size=len(body), source_kind="bundle", params=bundle_params,
+        )
         return Response(
-            content=text.encode("utf-8"),
+            content=body,
             media_type="application/json; charset=utf-8",
             headers={"Content-Disposition": _content_disposition(series_title, "json")},
         )
@@ -1274,8 +1603,14 @@ async def export_series_merged(
                     parts.append("")
                     parts.append(_render_exercises_text(blk))
             parts.append("")
+        body = "\n".join(parts).encode("utf-8")
+        await _record_export_safely(
+            db, owner.id, lesson_plan_id=None, version_id=None,
+            format="txt", file_name=f"{series_title}.txt",
+            file_size=len(body), source_kind="bundle", params=bundle_params,
+        )
         return Response(
-            content="\n".join(parts).encode("utf-8"),
+            content=body,
             media_type="text/plain; charset=utf-8",
             headers={"Content-Disposition": _content_disposition(series_title, "txt")},
         )
@@ -1300,148 +1635,44 @@ async def export_series_merged(
                     parts.append("")
                     parts.append(_render_exercises_md(blk, level_offset=2))
             parts.append("")
+        body = "\n".join(parts).encode("utf-8")
+        await _record_export_safely(
+            db, owner.id, lesson_plan_id=None, version_id=None,
+            format="markdown", file_name=f"{series_title}.md",
+            file_size=len(body), source_kind="bundle", params=bundle_params,
+        )
         return Response(
-            content="\n".join(parts).encode("utf-8"),
+            content=body,
             media_type="text/markdown; charset=utf-8",
             headers={"Content-Disposition": _content_disposition(series_title, "md")},
         )
 
     if fmt == "docx":
-        from docx import Document
-        from docx.shared import Pt
-        from docx.enum.text import WD_ALIGN_PARAGRAPH
-        doc = Document()
-        style = doc.styles["Normal"]
-        style.font.size = Pt(11)
-        style.font.name = "SimSun"
-
-        title_para = doc.add_heading(series_title, level=0)
-        title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        meta_lines = []
-        if series.subject:
-            meta_lines.append(("学科", series.subject))
-        if series.grade_level:
-            meta_lines.append(("学段", series.grade_level))
-        if getattr(series, "major", None):
-            meta_lines.append(("专业", series.major))
-        meta_lines.append(("总课时", str(len(built))))
-        for k, v in meta_lines:
-            p = doc.add_paragraph()
-            rk = p.add_run(f"{k}: "); rk.bold = True
-            p.add_run(str(v))
-        doc.add_paragraph("")
-
-        for b in built:
-            doc.add_page_break()
-            doc.add_heading(f"{b['prefix']}  {b['data']['title']}", level=1)
-            d = b["data"]
-            for k, v in d["meta"].items():
-                p = doc.add_paragraph()
-                rk = p.add_run(f"{k}: "); rk.bold = True
-                p.add_run(str(v))
-            doc.add_paragraph("")
-            if d["full_optimized"]:
-                doc.add_heading("优化教案", level=2)
-                for line in d["full_optimized"].split("\n"):
-                    if line.strip():
-                        doc.add_paragraph(line.strip())
-            if d["full_draft"]:
-                doc.add_heading("初步教案", level=2)
-                for line in d["full_draft"].split("\n"):
-                    if line.strip():
-                        doc.add_paragraph(line.strip())
-            if d["stages"]:
-                doc.add_heading("各环节详情", level=2)
-                for s in d["stages"]:
-                    header = f"{s['model_name']} - {s['stage_name']}" if s["model_name"] else s["stage_name"]
-                    doc.add_heading(header, level=3)
-                    if s["expert"]:
-                        pp = doc.add_paragraph()
-                        run = pp.add_run(f"采纳专家: {s['expert']}"); run.italic = True
-                    for line in (s["content"] or s["draft"] or "").split("\n"):
-                        if line.strip():
-                            doc.add_paragraph(line.strip())
-            if include_exercises:
-                for blk in exercises_map.get(b["lesson"].id, []):
-                    _render_exercises_docx(doc, blk)
-
-        buf = BytesIO()
-        doc.save(buf)
-        buf.seek(0)
+        docx_bytes = await run_in_executor(
+            _build_series_merged_docx, series_title, built, series, include_exercises, exercises_map
+        )
+        await _record_export_safely(
+            db, owner.id, lesson_plan_id=None, version_id=None,
+            format="docx", file_name=f"{series_title}.docx",
+            file_size=len(docx_bytes), source_kind="bundle", params=bundle_params,
+        )
         return Response(
-            content=buf.getvalue(),
+            content=docx_bytes,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             headers={"Content-Disposition": _content_disposition(series_title, "docx")},
         )
 
     if fmt == "pdf":
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib.styles import ParagraphStyle
-        from reportlab.lib.units import cm
-        from reportlab.lib.colors import HexColor
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, PageBreak
-
-        _ensure_pdf_font()
-        fn = _PDF_FONT_NAME
-        S = {
-            "title": ParagraphStyle("T", fontName=fn, fontSize=18, alignment=1, spaceAfter=10, leading=26),
-            "h1": ParagraphStyle("H1", fontName=fn, fontSize=15, spaceBefore=18, spaceAfter=10, leading=22),
-            "h2": ParagraphStyle("H2", fontName=fn, fontSize=13, spaceBefore=14, spaceAfter=6, leading=20),
-            "h3": ParagraphStyle("H3", fontName=fn, fontSize=12, spaceBefore=10, spaceAfter=6, leading=18),
-            "body": ParagraphStyle("B", fontName=fn, fontSize=10.5, leading=18, spaceAfter=3),
-            "meta": ParagraphStyle("M", fontName=fn, fontSize=10.5, leading=16, spaceAfter=2),
-        }
-
-        def esc(t: str) -> str:
-            return (t or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-        buf = BytesIO()
-        pdoc = SimpleDocTemplate(
-            buf, pagesize=A4,
-            leftMargin=2 * cm, rightMargin=2 * cm, topMargin=2 * cm, bottomMargin=2 * cm,
+        pdf_bytes = await run_in_executor(
+            _build_series_merged_pdf, series_title, built, series, include_exercises, exercises_map
         )
-        elems = [Paragraph(esc(series_title), S["title"]), Spacer(1, 6)]
-        if series.subject:
-            elems.append(Paragraph(f"<b>学科:</b> {esc(series.subject)}", S["meta"]))
-        if series.grade_level:
-            elems.append(Paragraph(f"<b>学段:</b> {esc(series.grade_level)}", S["meta"]))
-        if getattr(series, "major", None):
-            elems.append(Paragraph(f"<b>专业:</b> {esc(series.major)}", S["meta"]))
-        elems.append(Paragraph(f"<b>总课时:</b> {len(built)}", S["meta"]))
-        elems.append(HRFlowable(width="100%", thickness=0.5, color=HexColor("#cccccc")))
-
-        for b in built:
-            elems.append(PageBreak())
-            elems.append(Paragraph(esc(f"{b['prefix']}  {b['data']['title']}"), S["h1"]))
-            d = b["data"]
-            for k, v in d["meta"].items():
-                elems.append(Paragraph(f"<b>{esc(k)}:</b> {esc(str(v))}", S["meta"]))
-            elems.append(Spacer(1, 6))
-            for label, text in [("优化教案", d["full_optimized"]), ("初步教案", d["full_draft"])]:
-                if text:
-                    elems.append(Paragraph(esc(label), S["h2"]))
-                    for line in text.split("\n"):
-                        line = line.strip()
-                        if line:
-                            elems.append(Paragraph(esc(line), S["body"]))
-            if d["stages"]:
-                elems.append(Paragraph(esc("各环节详情"), S["h2"]))
-                for s in d["stages"]:
-                    header = f"{s['model_name']} - {s['stage_name']}" if s["model_name"] else s["stage_name"]
-                    elems.append(Paragraph(esc(header), S["h3"]))
-                    if s["expert"]:
-                        elems.append(Paragraph(f"<i>采纳专家: {esc(s['expert'])}</i>", S["meta"]))
-                    for line in (s["content"] or s["draft"] or "").split("\n"):
-                        line = line.strip()
-                        if line:
-                            elems.append(Paragraph(esc(line), S["body"]))
-            if include_exercises:
-                for blk in exercises_map.get(b["lesson"].id, []):
-                    elems.extend(_render_exercises_pdf_elems(blk, S))
-
-        pdoc.build(elems)
+        await _record_export_safely(
+            db, owner.id, lesson_plan_id=None, version_id=None,
+            format="pdf", file_name=f"{series_title}.pdf",
+            file_size=len(pdf_bytes), source_kind="bundle", params=bundle_params,
+        )
         return Response(
-            content=buf.getvalue(),
+            content=pdf_bytes,
             media_type="application/pdf",
             headers={"Content-Disposition": _content_disposition(series_title, "pdf")},
         )
@@ -1449,41 +1680,174 @@ async def export_series_merged(
     raise HTTPException(status_code=400, detail=f"暂不支持的格式：{fmt}")
 
 
-@router.get("/series/{series_id}/export-zip")
-async def export_series_zip(
-    series_id: str,
-    format: str = "docx",
-    include_exercises: bool = False,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-):
-    """Export each lesson as its own file and package into a zip archive."""
-    fmt = (format or "docx").lower()
-    if fmt not in ALLOWED_SERIES_FORMATS:
-        raise HTTPException(status_code=400, detail=f"不支持的格式：{fmt}")
+def _build_series_merged_docx(
+    series_title: str,
+    built: list,
+    series: LessonSeries,
+    include_exercises: bool,
+    exercises_map: dict,
+) -> bytes:
+    """Synchronous DOCX builder for series merged export. Call via run_in_executor."""
+    from docx import Document
+    from docx.shared import Pt
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-    series, lessons = await _load_series_lessons(series_id, db, current_user)
+    doc = Document()
+    style = doc.styles["Normal"]
+    style.font.size = Pt(11)
+    style.font.name = "SimSun"
 
+    title_para = doc.add_heading(series_title, level=0)
+    title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    meta_lines: list[tuple[str, str]] = []
+    if series.subject:
+        meta_lines.append(("学科", series.subject))
+    if series.grade_level:
+        meta_lines.append(("学段", series.grade_level))
+    if getattr(series, "major", None):
+        meta_lines.append(("专业", series.major))
+    meta_lines.append(("总课时", str(len(built))))
+    for k, v in meta_lines:
+        p = doc.add_paragraph()
+        rk = p.add_run(f"{k}: ")
+        rk.bold = True
+        p.add_run(str(v))
+    doc.add_paragraph("")
+
+    for b in built:
+        doc.add_page_break()
+        doc.add_heading(f"{b['prefix']}  {b['data']['title']}", level=1)
+        d = b["data"]
+        for k, v in d["meta"].items():
+            p = doc.add_paragraph()
+            rk = p.add_run(f"{k}: ")
+            rk.bold = True
+            p.add_run(str(v))
+        doc.add_paragraph("")
+        if d["full_optimized"]:
+            doc.add_heading("优化教案", level=2)
+            for line in d["full_optimized"].split("\n"):
+                if line.strip():
+                    doc.add_paragraph(line.strip())
+        if d["full_draft"]:
+            doc.add_heading("初步教案", level=2)
+            for line in d["full_draft"].split("\n"):
+                if line.strip():
+                    doc.add_paragraph(line.strip())
+        if d["stages"]:
+            doc.add_heading("各环节详情", level=2)
+            for s in d["stages"]:
+                header = f"{s['model_name']} - {s['stage_name']}" if s["model_name"] else s["stage_name"]
+                doc.add_heading(header, level=3)
+                if s["expert"]:
+                    pp = doc.add_paragraph()
+                    run = pp.add_run(f"采纳专家: {s['expert']}")
+                    run.italic = True
+                for line in (s["content"] or s["draft"] or "").split("\n"):
+                    if line.strip():
+                        doc.add_paragraph(line.strip())
+        if include_exercises:
+            for blk in exercises_map.get(b["lesson"].id, []):
+                _render_exercises_docx(doc, blk)
+
+    buf = BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _build_series_merged_pdf(
+    series_title: str,
+    built: list,
+    series: LessonSeries,
+    include_exercises: bool,
+    exercises_map: dict,
+) -> bytes:
+    """Synchronous PDF builder for series merged export. Call via run_in_executor."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib.colors import HexColor
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, PageBreak
+
+    _ensure_pdf_font()
+    fn = _PDF_FONT_NAME
+    S = {
+        "title": ParagraphStyle("T", fontName=fn, fontSize=18, alignment=1, spaceAfter=10, leading=26),
+        "h1": ParagraphStyle("H1", fontName=fn, fontSize=15, spaceBefore=18, spaceAfter=10, leading=22),
+        "h2": ParagraphStyle("H2", fontName=fn, fontSize=13, spaceBefore=14, spaceAfter=6, leading=20),
+        "h3": ParagraphStyle("H3", fontName=fn, fontSize=12, spaceBefore=10, spaceAfter=6, leading=18),
+        "body": ParagraphStyle("B", fontName=fn, fontSize=10.5, leading=18, spaceAfter=3),
+        "meta": ParagraphStyle("M", fontName=fn, fontSize=10.5, leading=16, spaceAfter=2),
+    }
+
+    def esc(t: str) -> str:
+        return (t or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    buf = BytesIO()
+    pdoc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=2 * cm, rightMargin=2 * cm, topMargin=2 * cm, bottomMargin=2 * cm,
+    )
+    elems = [Paragraph(esc(series_title), S["title"]), Spacer(1, 6)]
+    if series.subject:
+        elems.append(Paragraph(f"<b>学科:</b> {esc(series.subject)}", S["meta"]))
+    if series.grade_level:
+        elems.append(Paragraph(f"<b>学段:</b> {esc(series.grade_level)}", S["meta"]))
+    if getattr(series, "major", None):
+        elems.append(Paragraph(f"<b>专业:</b> {esc(series.major)}", S["meta"]))
+    elems.append(Paragraph(f"<b>总课时:</b> {len(built)}", S["meta"]))
+    elems.append(HRFlowable(width="100%", thickness=0.5, color=HexColor("#cccccc")))
+
+    for b in built:
+        elems.append(PageBreak())
+        elems.append(Paragraph(esc(f"{b['prefix']}  {b['data']['title']}"), S["h1"]))
+        d = b["data"]
+        for k, v in d["meta"].items():
+            elems.append(Paragraph(f"<b>{esc(k)}:</b> {esc(str(v))}", S["meta"]))
+        elems.append(Spacer(1, 6))
+        for label, text in [("优化教案", d["full_optimized"]), ("初步教案", d["full_draft"])]:
+            if text:
+                elems.append(Paragraph(esc(label), S["h2"]))
+                for line in text.split("\n"):
+                    line = line.strip()
+                    if line:
+                        elems.append(Paragraph(esc(line), S["body"]))
+        if d["stages"]:
+            elems.append(Paragraph(esc("各环节详情"), S["h2"]))
+            for s in d["stages"]:
+                header = f"{s['model_name']} - {s['stage_name']}" if s["model_name"] else s["stage_name"]
+                elems.append(Paragraph(esc(header), S["h3"]))
+                if s["expert"]:
+                    elems.append(Paragraph(f"<i>采纳专家: {esc(s['expert'])}</i>", S["meta"]))
+                for line in (s["content"] or s["draft"] or "").split("\n"):
+                    line = line.strip()
+                    if line:
+                        elems.append(Paragraph(esc(line), S["body"]))
+        if include_exercises:
+            for blk in exercises_map.get(b["lesson"].id, []):
+                elems.extend(_render_exercises_pdf_elems(blk, S))
+
+    pdoc.build(elems)
+    return buf.getvalue()
+
+
+def _build_series_zip_bytes(
+    fmt: str,
+    series: LessonSeries,
+    lessons_built: list,
+    include_exercises: bool,
+    exercises_map: dict,
+) -> bytes:
+    """Synchronous ZIP builder for series. Each `lessons_built` item: {idx, lesson, data, prefix, base}."""
     import zipfile
-    import re
-
-    def _safe_name(name: str) -> str:
-        name = re.sub(r"[\\/:*?\"<>|]", "_", name or "")
-        return name.strip() or "lesson"
-
-    lesson_ids = [l.id for l in lessons]
-    exercises_map: dict[str, list[dict]] = {}
-    if include_exercises:
-        exercises_map = await _fetch_exercises_for_lessons(db, current_user.id, lesson_ids)
 
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for idx, lesson in enumerate(lessons):
-            if not lesson.final_content:
-                continue
-            d = _build_doc_sections(lesson)
-            prefix = _series_prefix(series, lesson, idx)
-            base = f"{prefix}-{_safe_name(d['title'])}"
+        for entry in lessons_built:
+            lesson = entry["lesson"]
+            d = entry["data"]
+            base = entry["base"]
+            prefix = entry["prefix"]
             ext_blocks = exercises_map.get(lesson.id, []) if include_exercises else []
 
             if fmt == "txt":
@@ -1513,11 +1877,14 @@ async def export_series_zip(
                 from docx import Document
                 from docx.shared import Pt
                 doc = Document()
-                st = doc.styles["Normal"]; st.font.size = Pt(11); st.font.name = "SimSun"
+                st = doc.styles["Normal"]
+                st.font.size = Pt(11)
+                st.font.name = "SimSun"
                 doc.add_heading(d["title"], level=0)
                 for k, v in d["meta"].items():
                     p = doc.add_paragraph()
-                    rk = p.add_run(f"{k}: "); rk.bold = True
+                    rk = p.add_run(f"{k}: ")
+                    rk.bold = True
                     p.add_run(str(v))
                 if d["full_optimized"]:
                     doc.add_heading("优化教案", level=1)
@@ -1536,7 +1903,8 @@ async def export_series_zip(
                         doc.add_heading(header, level=2)
                         if s["expert"]:
                             pp = doc.add_paragraph()
-                            run = pp.add_run(f"采纳专家: {s['expert']}"); run.italic = True
+                            run = pp.add_run(f"采纳专家: {s['expert']}")
+                            run.italic = True
                         for line in (s["content"] or s["draft"] or "").split("\n"):
                             if line.strip():
                                 doc.add_paragraph(line.strip())
@@ -1549,7 +1917,6 @@ async def export_series_zip(
                 pdf_bytes = _build_pdf_bytes(d)
                 zf.writestr(f"{base}.pdf", pdf_bytes)
                 if ext_blocks:
-                    # attach exercises as a secondary pdf file in the zip
                     from reportlab.lib.pagesizes import A4
                     from reportlab.lib.styles import ParagraphStyle
                     from reportlab.lib.units import cm
@@ -1565,17 +1932,399 @@ async def export_series_zip(
                         sub, pagesize=A4,
                         leftMargin=2 * cm, rightMargin=2 * cm, topMargin=2 * cm, bottomMargin=2 * cm,
                     )
-                    elems = []
+                    elems: list = []
                     for blk in ext_blocks:
                         elems.extend(_render_exercises_pdf_elems(blk, S))
                     if elems:
                         pdoc.build(elems)
                         zf.writestr(f"{base}-exercises.pdf", sub.getvalue())
 
-    buf.seek(0)
+    return buf.getvalue()
+
+
+def _safe_filename(name: str) -> str:
+    import re
+    name = re.sub(r"[\\/:*?\"<>|]", "_", name or "")
+    return name.strip() or "lesson"
+
+
+@router.get("/series/{series_id}/export-zip")
+async def export_series_zip(
+    series_id: str,
+    format: str = "docx",
+    include_exercises: bool = False,
+    for_user_id: Optional[str] = Query(None, description="管理员：代导出指定用户的系列"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Export each lesson as its own file and package into a zip archive."""
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    fmt = (format or "docx").lower()
+    if fmt not in ALLOWED_SERIES_FORMATS:
+        raise HTTPException(status_code=400, detail=f"不支持的格式：{fmt}")
+
+    series, lessons = await _load_series_lessons(series_id, db, owner)
+
+    lesson_ids = [l.id for l in lessons]
+    exercises_map: dict[str, list[dict]] = {}
+    if include_exercises:
+        exercises_map = await _fetch_exercises_for_lessons(db, owner.id, lesson_ids)
+
+    lessons_built: list[dict] = []
+    for idx, lesson in enumerate(lessons):
+        if not lesson.final_content:
+            continue
+        d = _build_doc_sections(lesson)
+        prefix = _series_prefix(series, lesson, idx)
+        base = f"{prefix}-{_safe_filename(d['title'])}"
+        lessons_built.append({"idx": idx, "lesson": lesson, "data": d, "prefix": prefix, "base": base})
+
+    if not lessons_built:
+        raise HTTPException(status_code=400, detail="系列中没有任何已完成的教案")
+
+    zip_bytes = await run_in_executor(
+        _build_series_zip_bytes, fmt, series, lessons_built, include_exercises, exercises_map
+    )
+
     zip_title = f"{series.title or 'series'}_{fmt}"
+    await _record_export_safely(
+        db, owner.id,
+        lesson_plan_id=None,
+        version_id=None,
+        format="zip",
+        file_name=f"{zip_title}.zip",
+        file_size=len(zip_bytes),
+        source_kind="bundle",
+        params={"series_id": series_id, "format": fmt, "include_exercises": include_exercises, "type": "zip"},
+    )
+
     return Response(
-        content=buf.getvalue(),
+        content=zip_bytes,
         media_type="application/zip",
         headers={"Content-Disposition": _content_disposition(zip_title, "zip")},
     )
+
+
+# ───────────────────────────────────────────────────────────────────
+# 异步系列导出：QueueJob kind=export_bundle，结果落到 tmp_exports/，7 天 TTL
+# ───────────────────────────────────────────────────────────────────
+
+class _AsyncExportResponse(BaseModel):
+    record_id: str
+    status: str
+    job_enqueued: bool
+    expires_at: Optional[datetime] = None
+
+
+def _bundle_ext_for(format_: str, bundle_type: str) -> str:
+    if bundle_type == "zip":
+        return "zip"
+    return {"markdown": "md"}.get(format_, format_)
+
+
+@router.post("/series/{series_id}/export-merged-async", response_model=_AsyncExportResponse)
+async def export_series_merged_async(
+    series_id: str,
+    format: str = Query("docx"),
+    include_exercises: bool = Query(False),
+    for_user_id: Optional[str] = Query(None, description="管理员：代导出指定用户的系列"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """异步合并导出：写入 ExportRecord(status=queued)，QueueJob 接力执行，7 天 TTL。"""
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    fmt = (format or "docx").lower()
+    if fmt not in ALLOWED_SERIES_FORMATS:
+        raise HTTPException(status_code=400, detail=f"不支持的格式：{fmt}")
+
+    series, _lessons = await _load_series_lessons(series_id, db, owner)
+    series_title = series.title or "系列教案"
+    file_name = f"{series_title}.{_bundle_ext_for(fmt, 'merged')}"
+
+    record = ExportRecord(
+        id=str(uuid.uuid4()),
+        user_id=owner.id,
+        lesson_plan_id=None,
+        version_id=None,
+        format=fmt,
+        file_name=file_name,
+        source_kind="bundle",
+        status="queued",
+        params={
+            "series_id": series_id,
+            "format": fmt,
+            "include_exercises": include_exercises,
+            "type": "merged",
+        },
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=TMP_EXPORTS_TTL_HOURS),
+    )
+    db.add(record)
+    await db.commit()
+    await db.refresh(record)
+
+    from app.tasks.queue_manager import enqueue
+    ok = await enqueue(
+        target_id=record.id,
+        kind="export_bundle",
+        user_id=owner.id,
+        max_attempts=2,
+    )
+
+    return _AsyncExportResponse(
+        record_id=record.id,
+        status=record.status,
+        job_enqueued=bool(ok),
+        expires_at=record.expires_at,
+    )
+
+
+@router.post("/series/{series_id}/export-zip-async", response_model=_AsyncExportResponse)
+async def export_series_zip_async(
+    series_id: str,
+    format: str = Query("docx"),
+    include_exercises: bool = Query(False),
+    for_user_id: Optional[str] = Query(None, description="管理员：代导出指定用户的系列"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """异步逐课打包导出（zip）。"""
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    fmt = (format or "docx").lower()
+    if fmt not in ALLOWED_SERIES_FORMATS:
+        raise HTTPException(status_code=400, detail=f"不支持的格式：{fmt}")
+
+    series, _lessons = await _load_series_lessons(series_id, db, owner)
+    series_title = series.title or "系列教案"
+    zip_name = f"{series_title}_{fmt}.zip"
+
+    record = ExportRecord(
+        id=str(uuid.uuid4()),
+        user_id=owner.id,
+        lesson_plan_id=None,
+        version_id=None,
+        format="zip",
+        file_name=zip_name,
+        source_kind="bundle",
+        status="queued",
+        params={
+            "series_id": series_id,
+            "format": fmt,
+            "include_exercises": include_exercises,
+            "type": "zip",
+        },
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=TMP_EXPORTS_TTL_HOURS),
+    )
+    db.add(record)
+    await db.commit()
+    await db.refresh(record)
+
+    from app.tasks.queue_manager import enqueue
+    ok = await enqueue(
+        target_id=record.id,
+        kind="export_bundle",
+        user_id=owner.id,
+        max_attempts=2,
+    )
+
+    return _AsyncExportResponse(
+        record_id=record.id,
+        status=record.status,
+        job_enqueued=bool(ok),
+        expires_at=record.expires_at,
+    )
+
+
+# ───────────────────────────────────────────────────────────────────
+# Queue handler：执行 ExportRecord(status=queued) 的实际构建
+# 由 app/tasks/job_handlers.py 在启动时注册到 kind=export_bundle
+# ───────────────────────────────────────────────────────────────────
+
+async def _bundle_emit_socket(user_id: str, record_id: str, status: str, **extra):
+    sio = _get_sio()
+    if not sio:
+        return
+    try:
+        payload = {"record_id": record_id, "status": status, **extra}
+        await sio.emit("export_record_update", payload, room=f"user_{user_id}")
+    except Exception:
+        pass
+
+
+async def _bundle_mark_status(record_id: str, **fields):
+    """更新 ExportRecord 状态字段，使用独立 session。"""
+    async with async_session_maker() as session:
+        res = await session.execute(select(ExportRecord).where(ExportRecord.id == record_id))
+        rec = res.scalar_one_or_none()
+        if not rec:
+            return None
+        for k, v in fields.items():
+            setattr(rec, k, v)
+        await session.commit()
+        await session.refresh(rec)
+        return rec
+
+
+async def run_bundle_export_job(record_id: str):
+    """`kind=export_bundle` handler：把 queued 的 ExportRecord 实际渲染并落盘。"""
+    async with async_session_maker() as session:
+        res = await session.execute(select(ExportRecord).where(ExportRecord.id == record_id))
+        record = res.scalar_one_or_none()
+        if not record:
+            logger.warning(f"[bundle] record not found: {record_id}")
+            return
+        user_id = record.user_id
+        params = record.params or {}
+        series_id = params.get("series_id")
+        fmt = params.get("format") or record.format
+        include_exercises = bool(params.get("include_exercises"))
+        bundle_type = params.get("type") or "merged"
+
+    if not series_id or fmt not in ALLOWED_SERIES_FORMATS:
+        await _bundle_mark_status(
+            record_id, status="failed",
+            error_message=f"invalid params: series_id={series_id} fmt={fmt}",
+        )
+        await _bundle_emit_socket(user_id, record_id, "failed", error="invalid params")
+        return
+
+    await _bundle_mark_status(record_id, status="running")
+    await _bundle_emit_socket(user_id, record_id, "running")
+
+    try:
+        async with async_session_maker() as session:
+            r = await session.execute(
+                select(LessonSeries).where(LessonSeries.id == series_id, LessonSeries.user_id == user_id)
+            )
+            series = r.scalar_one_or_none()
+            if not series:
+                raise RuntimeError(f"series not found: {series_id}")
+
+            r2 = await session.execute(
+                select(LessonPlan)
+                .where(LessonPlan.sequence_id == series_id, LessonPlan.user_id == user_id)
+                .order_by(LessonPlan.sequence_order)
+            )
+            lessons = list(r2.scalars().all())
+
+            exercises_map: dict[str, list[dict]] = {}
+            if include_exercises:
+                exercises_map = await _fetch_exercises_for_lessons(
+                    session, user_id, [l.id for l in lessons]
+                )
+
+        built: list[dict] = []
+        for idx, lesson in enumerate(lessons):
+            if not lesson.final_content:
+                continue
+            d = _build_doc_sections(lesson)
+            prefix = _series_prefix(series, lesson, idx)
+            base = f"{prefix}-{_safe_filename(d['title'])}"
+            built.append({"idx": idx, "lesson": lesson, "data": d, "prefix": prefix, "base": base})
+
+        if not built:
+            raise RuntimeError("系列中没有任何已完成的教案")
+
+        series_title = series.title or "系列教案"
+
+        if bundle_type == "zip":
+            data_bytes = await run_in_executor(
+                _build_series_zip_bytes, fmt, series, built, include_exercises, exercises_map
+            )
+            ext = "zip"
+        elif fmt == "json":
+            payload = {
+                "series": {
+                    "id": series.id, "title": series.title, "subject": series.subject,
+                    "grade_level": series.grade_level,
+                },
+                "lessons": [
+                    {"prefix": b["prefix"], "title": b["lesson"].title,
+                     "final_content": _parse_fc(b["lesson"].final_content),
+                     **({"exercises": exercises_map.get(b["lesson"].id, [])} if include_exercises else {})}
+                    for b in built
+                ],
+            }
+            data_bytes = json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default).encode("utf-8")
+            ext = "json"
+        elif fmt == "txt":
+            parts = [series_title, "=" * 40, ""]
+            for b in built:
+                parts.append(f"====== {b['prefix']}  {b['data']['title']} ======")
+                parts.append(_lesson_plain_text(b["data"]))
+                parts.append("")
+            data_bytes = "\n".join(parts).encode("utf-8")
+            ext = "txt"
+        elif fmt == "md":
+            parts = [f"# {series_title}", ""]
+            for b in built:
+                parts.append(f"## {b['prefix']}  {b['data']['title']}")
+                parts.append(_lesson_markdown(b["data"], level_offset=2))
+                parts.append("")
+            data_bytes = "\n".join(parts).encode("utf-8")
+            ext = "md"
+        elif fmt == "docx":
+            data_bytes = await run_in_executor(
+                _build_series_merged_docx, series_title, built, series, include_exercises, exercises_map
+            )
+            ext = "docx"
+        elif fmt == "pdf":
+            data_bytes = await run_in_executor(
+                _build_series_merged_pdf, series_title, built, series, include_exercises, exercises_map
+            )
+            ext = "pdf"
+        else:
+            raise RuntimeError(f"未知格式：{fmt}")
+
+        file_path = os.path.join(TMP_EXPORTS_DIR, f"{record_id}.{ext}")
+        with open(file_path, "wb") as fp:
+            fp.write(data_bytes)
+
+        await _bundle_mark_status(
+            record_id,
+            status="done",
+            file_path=file_path,
+            file_size=len(data_bytes),
+        )
+        await _bundle_emit_socket(
+            user_id, record_id, "done",
+            file_size=len(data_bytes),
+            download_url=f"/api/v1/documents/exports/{record_id}/download",
+        )
+        logger.info(f"[bundle] done record={record_id} ext={ext} size={len(data_bytes)}")
+    except Exception as e:
+        logger.exception(f"[bundle] failed record={record_id}: {e}")
+        await _bundle_mark_status(
+            record_id, status="failed",
+            error_message=f"{type(e).__name__}: {e}",
+        )
+        await _bundle_emit_socket(user_id, record_id, "failed", error=str(e))
+        raise
+
+
+async def cleanup_expired_exports() -> int:
+    """删除 tmp_exports/ 下过期文件，把对应 ExportRecord.status 标为 expired。"""
+    cleaned = 0
+    now = datetime.now(timezone.utc)
+    async with async_session_maker() as session:
+        res = await session.execute(
+            select(ExportRecord)
+            .where(
+                ExportRecord.expires_at.isnot(None),
+                ExportRecord.expires_at < now,
+                ExportRecord.status.in_(["done", "running", "queued"]),
+            )
+        )
+        rows = list(res.scalars().all())
+        for r in rows:
+            if r.file_path and os.path.exists(r.file_path):
+                try:
+                    os.remove(r.file_path)
+                except Exception as e:
+                    logger.warning(f"[bundle-gc] unlink failed {r.file_path}: {e}")
+            r.status = "expired"
+            r.file_path = None
+            cleaned += 1
+        await session.commit()
+    if cleaned:
+        logger.info(f"[bundle-gc] expired {cleaned} export records")
+    return cleaned

@@ -194,3 +194,82 @@ class AIService:
             max_tokens=max_tokens,
         )
         return response.choices[0].message.content
+
+    # ──────────────────────────────────────────────────────────────
+    # 文档修订（"我的文档" 模块用）— 优先 Qwen，回落其它 provider
+    # ──────────────────────────────────────────────────────────────
+
+    REVISE_DOC_SYSTEM = (
+        "你是一名严谨细致的教学文档编辑助理。"
+        "用户会给你一份 Markdown 教学文档与修改要求。"
+        "请按要求修改全文，输出**完整的、可直接覆盖原文的 Markdown**。"
+        "硬性约束：\n"
+        "1) 保留原文整体结构（章节标题、列表、代码块、图片引用），除非用户明确要求增删；\n"
+        "2) 不要输出修改说明、不要 markdown 代码块包裹整篇；\n"
+        "3) 中文教学场景，语言保持自然通顺；\n"
+        "4) 不要丢失内容，除非用户明确要求精简或删除。"
+    )
+
+    REVISE_PARA_SYSTEM = (
+        "你是一名严谨细致的教学文档编辑助理。"
+        "用户会给你一段 Markdown 文本和修改要求。"
+        "请按要求修改这一段，**只输出修改后的段落本身**，不要任何解释、引号或代码块包裹。"
+        "保持原段落的语义层级（如果是标题就仍是标题，是列表就仍是列表）。"
+    )
+
+    async def revise_document_stream(
+        self,
+        full_markdown: str,
+        instruction: str,
+        provider_name: Optional[str] = "qwen",
+        temperature: float = 0.3,
+        max_tokens: int = 8000,
+    ) -> AsyncGenerator[str, None]:
+        """整篇文档修订（流式）。"""
+        prompt = (
+            f"【用户的修改要求】\n{instruction.strip()}\n\n"
+            f"【当前 Markdown 全文】\n{full_markdown}\n\n"
+            f"请输出修改后的完整 Markdown："
+        )
+        async for chunk in self.generate_stream(
+            prompt=prompt,
+            provider_name=provider_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            system_message=self.REVISE_DOC_SYSTEM,
+        ):
+            yield chunk
+
+    async def revise_paragraph_stream(
+        self,
+        paragraph: str,
+        instruction: str,
+        context_before: str = "",
+        context_after: str = "",
+        provider_name: Optional[str] = "qwen",
+        temperature: float = 0.3,
+        max_tokens: int = 2000,
+    ) -> AsyncGenerator[str, None]:
+        """段落级修订（流式）。可选传入前后上下文以保持连贯。"""
+        ctx_before = context_before.strip()
+        ctx_after = context_after.strip()
+        ctx_block = ""
+        if ctx_before:
+            ctx_block += f"【上文（仅供参考，不要输出）】\n{ctx_before}\n\n"
+        if ctx_after:
+            ctx_block += f"【下文（仅供参考，不要输出）】\n{ctx_after}\n\n"
+
+        prompt = (
+            f"{ctx_block}"
+            f"【需要修改的段落】\n{paragraph}\n\n"
+            f"【用户的修改要求】\n{instruction.strip()}\n\n"
+            f"请输出修改后的段落："
+        )
+        async for chunk in self.generate_stream(
+            prompt=prompt,
+            provider_name=provider_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            system_message=self.REVISE_PARA_SYSTEM,
+        ):
+            yield chunk

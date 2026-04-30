@@ -180,6 +180,7 @@ async def get_db():
 async def init_db():
     # 表结构统一由 supabase_schema.sql 维护，这里只确保 ORM 注册完整
     import app.models.course_tool  # noqa: F401 – register table
+    import app.models.lesson  # noqa: F401 – ensure DocumentVersion / ExportRecord registered
     return None
 
 

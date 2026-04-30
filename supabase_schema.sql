@@ -17,11 +17,13 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash VARCHAR(255) NOT NULL,
     role        VARCHAR(20)  NOT NULL DEFAULT 'free',       -- free / personal / school
     quota_remaining INTEGER  NOT NULL DEFAULT 100,
+    access_level VARCHAR(20)  NOT NULL DEFAULT 'full',  -- full | limited | admin
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
 
     CONSTRAINT uq_users_username UNIQUE (username),
-    CONSTRAINT uq_users_email    UNIQUE (email)
+    CONSTRAINT uq_users_email    UNIQUE (email),
+    CONSTRAINT users_access_level_check CHECK (access_level IN ('full', 'limited', 'admin'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_username ON users (username);
@@ -247,6 +249,8 @@ CREATE TRIGGER trg_lesson_series_updated
 
 -- ============================================================
 -- 11. Supabase RLS（行级安全）— 可选，按需开启
+--     管理员代管（for_user_id）为应用层逻辑，无额外 DDL；若启用 RLS + PostgREST，
+--     参见 supabase_admin_scope_migration.sql 文末说明。
 -- ============================================================
 -- ALTER TABLE users              ENABLE ROW LEVEL SECURITY;
 -- ALTER TABLE lesson_plans       ENABLE ROW LEVEL SECURITY;
@@ -260,5 +264,61 @@ CREATE TRIGGER trg_lesson_series_updated
 --   FOR ALL USING (user_id = auth.uid()::text);
 
 -- ============================================================
--- Done. 共 7 张业务表 + 3 个触发器 + 种子数据
+-- 12. document_versions — 教案/课程产物的可编辑文档版本快照
+-- ============================================================
+CREATE TABLE IF NOT EXISTS document_versions (
+    id                VARCHAR(36)  PRIMARY KEY DEFAULT uuid_generate_v4()::text,
+    user_id           VARCHAR(36)  NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    lesson_plan_id    VARCHAR(36)  REFERENCES lesson_plans(id) ON DELETE CASCADE,
+    source_kind       VARCHAR(30)  NOT NULL DEFAULT 'lesson_optimized',
+    source_ref_id     VARCHAR(36),
+    title             VARCHAR(200) NOT NULL DEFAULT '未命名文档',
+    content_markdown  TEXT         NOT NULL DEFAULT '',
+    version_number    INTEGER      NOT NULL DEFAULT 1,
+    parent_version_id VARCHAR(36),
+    change_summary    TEXT,
+    change_source     VARCHAR(20)  NOT NULL DEFAULT 'user_edit',
+    ai_prompt         TEXT,
+    is_current        BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_doc_versions_user_created
+    ON document_versions (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_doc_versions_lesson
+    ON document_versions (lesson_plan_id, version_number DESC);
+CREATE INDEX IF NOT EXISTS idx_doc_versions_source_ref
+    ON document_versions (source_kind, source_ref_id);
+
+-- ============================================================
+-- 13. export_records — 用户导出/下载历史 + 临时缓存索引
+-- ============================================================
+CREATE TABLE IF NOT EXISTS export_records (
+    id              VARCHAR(36)  PRIMARY KEY DEFAULT uuid_generate_v4()::text,
+    user_id         VARCHAR(36)  NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    lesson_plan_id  VARCHAR(36)  REFERENCES lesson_plans(id) ON DELETE CASCADE,
+    version_id      VARCHAR(36)  REFERENCES document_versions(id) ON DELETE SET NULL,
+    source_kind     VARCHAR(30)  NOT NULL DEFAULT 'lesson',
+    format          VARCHAR(20)  NOT NULL,
+    file_name       VARCHAR(255) NOT NULL,
+    file_size       BIGINT,
+    file_path       VARCHAR(500),
+    job_id          VARCHAR(36),
+    status          VARCHAR(20)  NOT NULL DEFAULT 'done',
+    params          JSONB,
+    error_message   TEXT,
+    expires_at      TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_export_records_user_created
+    ON export_records (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_export_records_lesson
+    ON export_records (lesson_plan_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_export_records_expires
+    ON export_records (expires_at);
+
+-- ============================================================
+-- Done. 共 9 张业务表 + 3 个触发器 + 种子数据
 -- ============================================================

@@ -45,6 +45,8 @@ export default function CourseTools() {
   const t = useT()
   const urlTab = (searchParams.get('tab') as Tab) || 'outline'
   const urlResultId = searchParams.get('result_id') || ''
+  const forUserId = searchParams.get('for_user_id') || ''
+  const scopeParams = forUserId ? { for_user_id: forUserId } : undefined
   const [tab, _setTab] = useState<Tab>(urlTab)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -167,15 +169,15 @@ export default function CourseTools() {
 
   useEffect(() => {
     const lid = source?.kind === 'lesson' ? source.id : lessonId
-    api.get('/api/v1/course-tools/history', { params: { lesson_id: lid || undefined } })
+    api.get('/api/v1/course-tools/history', { params: { lesson_id: lid || undefined, ...(scopeParams || {}) } })
       .then(r => setHistory(r.data))
       .catch(() => {})
-  }, [lessonId, source, outlineId, pptId, exId, practiceId])
+  }, [lessonId, source, outlineId, pptId, exId, practiceId, forUserId])
 
   // Hydrate an existing result when URL carries ?result_id=
   useEffect(() => {
     if (!urlResultId) return
-    api.get(`/api/v1/course-tools/results/${urlResultId}`)
+    api.get(`/api/v1/course-tools/results/${urlResultId}`, { params: scopeParams })
       .then(r => {
         const d = r.data
         const type = d.tool_type as Tab
@@ -197,7 +199,7 @@ export default function CourseTools() {
       })
       .catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urlResultId])
+  }, [urlResultId, forUserId])
 
   // Listen for socket completion events that match our pending result_ids
   useEffect(() => {
@@ -207,7 +209,7 @@ export default function CourseTools() {
       const rid = payload?.result_id
       if (!rid) return
       try {
-        const r = await api.get(`/api/v1/course-tools/results/${rid}`)
+        const r = await api.get(`/api/v1/course-tools/results/${rid}`, { params: scopeParams })
         const d = r.data
         const type = d.tool_type as Tab
         // Only populate into visible tab if the tab matches
@@ -226,7 +228,7 @@ export default function CourseTools() {
     s.on('course_tool_completed', onDone)
     return () => { s.off('course_tool_completed', onDone) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [outlineId, pptId, exId, practiceId])
+  }, [outlineId, pptId, exId, practiceId, forUserId])
 
   const formData = (extra: Record<string, any>) => {
     const fd = new FormData()
@@ -287,7 +289,7 @@ export default function CourseTools() {
 
   const downloadWithAuth = async (endpoint: string) => {
     try {
-      const res = await api.get(`/api/v1/course-tools/${endpoint}`, { responseType: 'blob' })
+      const res = await api.get(`/api/v1/course-tools/${endpoint}`, { params: scopeParams, responseType: 'blob' })
       const url = URL.createObjectURL(res.data)
       const disp = res.headers['content-disposition'] || ''
       const match = disp.match(/filename\*?=(?:UTF-8'')?([^;\s]+)/i)
@@ -704,7 +706,9 @@ export default function CourseTools() {
                           try {
                             const fd = new FormData()
                             fd.append('ppt_id', pptId)
-                            const res = await api.post(`/api/v1/course-tools/practice/${practiceId}/merge-ppt`, fd)
+                            const res = await api.post(`/api/v1/course-tools/practice/${practiceId}/merge-ppt`, fd, {
+                              params: scopeParams,
+                            })
                             setPptId(res.data.id)
                             setError('')
                             toast.success(t('tools.merge_success'))

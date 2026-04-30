@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../services/api'
 import Header from '../components/layout/Header'
 import Button from '../components/ui/Button'
@@ -19,6 +19,9 @@ const UNI_GRADES = [
 
 export default function UniversityCreate() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const forUserId = searchParams.get('for_user_id') || undefined
+  const scopeQs = forUserId ? `?for_user_id=${encodeURIComponent(forUserId)}` : ''
   const t = useT()
 
   const [title, setTitle] = useState('')
@@ -87,8 +90,9 @@ export default function UniversityCreate() {
       }
       const res = await api.post('/api/v1/series', form, {
         headers: { 'Content-Type': 'multipart/form-data' },
+        params: forUserId ? { for_user_id: forUserId } : undefined,
       })
-      navigate(`/university/${res.data.id}`)
+      navigate(`/university/${res.data.id}${scopeQs}`)
     } catch (e: any) {
       setError(e.response?.data?.detail || t('university.create_failed'))
     } finally {

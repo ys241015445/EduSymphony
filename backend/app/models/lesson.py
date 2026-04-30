@@ -109,3 +109,55 @@ class Annotation(Base):
     content = Column(Text, nullable=False)
     request_regenerate = Column(Boolean, default=False)
     created_at = Column(DateTime, server_default=func.now())
+
+
+class DocumentVersion(Base):
+    """
+    教案/课程产物的可编辑文档版本快照。
+    存储 markdown 内容，每次保存（用户手动 / AI 整篇 / AI 段落）创建一条新记录。
+    """
+    __tablename__ = "document_versions"
+
+    id = Column(String(36), primary_key=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    lesson_plan_id = Column(String(36), ForeignKey("lesson_plans.id", ondelete="CASCADE"), nullable=True, index=True)
+    # 文档来源类型：lesson_draft / lesson_optimized / course_tool / custom
+    source_kind = Column(String(30), nullable=False, default="lesson_optimized")
+    # 来源对象 ID：course_tool_results.id 等（lesson 类用 lesson_plan_id 即可）
+    source_ref_id = Column(String(36), nullable=True, index=True)
+    title = Column(String(200), nullable=False, default="未命名文档")
+    content_markdown = Column(Text, nullable=False, default="")
+    version_number = Column(Integer, nullable=False, default=1)
+    parent_version_id = Column(String(36), nullable=True)
+    change_summary = Column(Text, nullable=True)
+    # 修改来源：user_edit / ai_full / ai_paragraph / system_init
+    change_source = Column(String(20), nullable=False, default="user_edit")
+    ai_prompt = Column(Text, nullable=True)
+    is_current = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class ExportRecord(Base):
+    """
+    导出记录：每次用户从教案/文档导出 PDF / DOCX / Markdown 等格式时插入。
+    file_path 为可选的临时缓存路径（系列导出 / 异步导出），expires_at 控制 7 天过期清理。
+    异步队列模式下：status=queued/running/done/failed，params 存桥接参数，error 存失败信息。
+    """
+    __tablename__ = "export_records"
+
+    id = Column(String(36), primary_key=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    lesson_plan_id = Column(String(36), ForeignKey("lesson_plans.id", ondelete="CASCADE"), nullable=True, index=True)
+    version_id = Column(String(36), ForeignKey("document_versions.id", ondelete="SET NULL"), nullable=True)
+    source_kind = Column(String(30), nullable=False, default="lesson")  # lesson / course_tool / bundle
+    format = Column(String(20), nullable=False)  # pdf / docx / markdown / json / txt / html / pptx / zip
+    file_name = Column(String(255), nullable=False)
+    file_size = Column(Integer, nullable=True)
+    file_path = Column(String(500), nullable=True)  # tmp_exports/{job_id}.{ext} 或空（直传不缓存）
+    job_id = Column(String(36), nullable=True)
+    status = Column(String(20), nullable=False, default="done")  # done / queued / running / failed / expired
+    params = Column(JSON, nullable=True)
+    error_message = Column(Text, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), index=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

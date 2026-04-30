@@ -3,7 +3,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 
-from app.core.deps import get_current_active_user
+from app.core.deps import get_current_active_user, user_access_level, ACCESS_LIMITED
 from app.core.database import db_pool_status
 from app.models.user import User
 from app.tasks.queue_manager import list_jobs, queue_snapshot, queue_status
@@ -36,7 +36,10 @@ async def get_queue_jobs(
 
     ``mine=true`` 时只返回当前用户自己的 job；
     ``kinds`` 可限定只看指定 kind 集合（course-tool 库常用）。
+    受限账号（limited）始终只能查看自己的任务。
     """
+    if user_access_level(current_user) == ACCESS_LIMITED:
+        mine = True
     kind_list = [k.strip() for k in kinds.split(",") if k.strip()] if kinds else None
     rows = await list_jobs(
         status=status, limit=limit, offset=offset,

@@ -110,4 +110,11 @@ def register_all_handlers() -> None:
     register_handler("tool_exercises", run_exercises_job)
     register_handler("tool_practice", run_practice_job)
 
+    # 系列/批量导出（异步）：写入 tmp_exports/，写 ExportRecord，7 天 TTL
+    from app.api.export import run_bundle_export_job, run_styled_pdf_job, run_material_job
+    register_handler("export_bundle", run_bundle_export_job)
+    register_handler("styled_pdf", run_styled_pdf_job)
+    register_handler("material_draft", run_material_job)
+    register_handler("material_optimized", run_material_job)
+
     logger.info("[queue] all job handlers registered")

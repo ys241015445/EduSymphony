@@ -14,6 +14,7 @@
 - **多地区适配**：支持澳门/香港繁体中文教案生成（含教青局基本学力要求等本地化结构）
 - **国际化 (i18n)**：前端支持简体中文、繁体中文、英文切换，自动根据地区切换字体与语言
 - **多用户隔离**：JWT 认证，每个用户只能看到和操作自己的教案，Socket.IO 按 lesson room 隔离推送
+- **RBAC**：`users.access_level` 区分管理员与普通/受限用户；管理员在 Dashboard 可查看队列任务与用户维度信息；受限用户仅保留必要入口。部署需执行 `supabase_user_access_level_migration.sql`（见下方 SQL 顺序）；**可选**在 7 步完成后追加 `supabase_safe_run.sql` 做保守加固（不自动设管理员账号）。**勿在 README、截图或 Git 中粘贴生产账号、密码或完整连接串。**
 - **云端数据库**：Supabase PostgreSQL 托管存储 + 本地文件存储，asyncpg 驱动 + 连接池自适应（直连 / Transaction Pooler 自动切换）
 - **系统公告 Banner**：顶部全站公告，可通过 `BANNER_TEXT` 环境变量一键配置
 - **Postgres 持久化任务队列**：队列落盘至 `queue_jobs` 表（`SELECT FOR UPDATE SKIP LOCKED`），支持重启恢复、多实例横向扩展、单用户并发上限、lease/sweeper 自动回收超时任务，Socket.IO 实时推送排队位置
@@ -39,10 +40,15 @@ EduSymphony/
 │   │   └── lesson_task.py           教案多阶段生成流水线
 │   ├── app/services/                AI 服务、PPT、模板填写等
 │   └── database/                    本地文件存储（上传 / 生成产物，不含数据表）
-├── supabase_schema.sql              Supabase 建表脚本（users / lesson_plans / discussions / 等 7 张业务表）
+├── supabase_schema.sql              Supabase 建表脚本（users / lesson_plans / discussions / 等核心业务表）
 ├── supabase_perf_indexes.sql        Supabase 性能优化索引（复合索引 + FK 索引 + ANALYZE）
 ├── supabase_queue_migration.sql     Postgres 持久化队列表 queue_jobs + 索引
 ├── supabase_university_migration.sql 大学页专用字段（lesson_series / lesson_plans 扩展列）
+├── supabase_documents_migration.sql 文档版本与导出记录（document_versions / export_records）
+├── supabase_course_tools_async_migration.sql 课程工具异步状态列（course_tool_results）
+├── supabase_user_access_level_migration.sql RBAC（users.access_level）
+├── supabase_safe_run.sql            可选：保守幂等加固 access_level + 索引（推荐生产复查）
+├── supabase_admin_scope_migration.sql 可选：与管理员代管说明一致；含 RLS/PostgREST 提示与列校验
 ├── docker-compose.yml               本地开发双容器（backend + frontend）
 ├── docker-compose.coolify.yml       生产单容器（Nginx + Supervisor）
 ├── Dockerfile                       生产单容器 Dockerfile
@@ -79,13 +85,21 @@ Phase 3: 生成优化教案（整合初步教案 + 各环节专家最佳建议�
 
 ## 快速开始
 
-> **首次部署必须按顺序在 Supabase Dashboard → SQL Editor 执行**以下 SQL 脚本：
-> 1. `supabase_schema.sql` —— 7 张业务表 + 触发器 + 种子数据
+> **首次部署必须按顺序在 Supabase Dashboard → SQL Editor 执行**以下 SQL 脚本（幂等设计，**可重复执行**）：
+> 1. `supabase_schema.sql` —— 核心业务表 + 触发器 + 教学模型种子数据
 > 2. `supabase_perf_indexes.sql` —— 性能索引
 > 3. `supabase_queue_migration.sql` —— 持久化任务队列 `queue_jobs`
 > 4. `supabase_university_migration.sql` —— 大学页新增字段
+> 5. `supabase_documents_migration.sql` —— 可编辑文档与导出记录表
+> 6. `supabase_course_tools_async_migration.sql` —— 课程工具异步任务状态
+> 7. `supabase_user_access_level_migration.sql` —— RBAC：`users.access_level`
 >
-> 所有脚本都是 `IF NOT EXISTS`，**可重复执行**，升级时重跑即可。
+> **（可选）第 8 步 — `access_level` 加固（二选一即可，均可重复执行）**  
+> - **`supabase_safe_run.sql`（推荐）**：归一化非法值、补 CHECK/索引；**不会**批量把账号改成 `admin`。  
+> - **`supabase_admin_scope_migration.sql`**：与管理员代管（应用层 `for_user_id`）对齐的说明 + 列存在校验；若库中缺少 `quota_remaining` 等会先报错，需先补齐主 schema。  
+> 若已跑过第 7 步且仅需「保险再跑一遍」，优先 `supabase_safe_run.sql`。  
+>
+> **密钥与安全**：真实数据库连接串、AI Key、`JWT_SECRET` 等只放在部署环境的 `.env`（或密钥管理）中；仓库内 `config.py` 默认值与 `.env.example` 仅为占位。**不要将生产账号、密码或 Key 写入 README、Issue 或提交到 Git。**
 
 ### 方式一：Windows 一键启动
 
@@ -94,8 +108,8 @@ Phase 3: 生成优化教案（整合初步教案 + 各环节专家最佳建议�
 cd backend
 setup.bat
 
-# 2. 编辑 .env 填入 AI 模型 Key + Supabase 连接串
-notepad backend\.env
+# 2. 在 backend 目录编辑 .env，填入 AI Key 与 Supabase 连接串（勿提交到 Git）
+notepad .env
 
 # 3. 安装前端环境
 cd ..\frontend
@@ -133,12 +147,23 @@ npm install                          # 首次运行
 npm run dev                          # vite 固定 3000；/api 与 /socket.io 代理到 127.0.0.1:3002
 ```
 
+若开发时前后端不同源或自定义 Socket 地址，可将 [`frontend/.env.example`](frontend/.env.example) 复制为 `frontend/.env` 或 `.env.local`，按需设置 `VITE_SOCKET_ORIGIN`、`VITE_DEV_BACKEND_PORT`；Docker 生产构建通常无需配置（Nginx 同源反代）。
+
 ### 方式三：Docker（本地 / 开发）
 
+**Docker / Compose 环境要求**：
+
+- **Docker Engine**：建议 **24+**（或 20.10+ 且已开启 **BuildKit**）。仓库根目录 [`Dockerfile`](Dockerfile) 使用 `COPY <<'EOF'` heredoc，**需要 BuildKit**；Docker Desktop 一般默认开启，Linux 可设 `DOCKER_BUILDKIT=1`。
+- **Docker Compose**：使用 **V2** 插件命令 `docker compose`（非旧的独立二进制 `docker-compose`）。
+- **构建资源**：前后端镜像同机构建建议预留约 **4GB+** 可用内存。
+- **Windows**：推荐 Docker Desktop 并启用 **WSL2** backend。
+
+Compose 从**仓库根目录**读取 `env_file: .env`。将根目录 [`.env.example`](.env.example) 复制为 `.env`（或与 [`backend/.env.example`](backend/.env.example) 保持相同键名），再填入占位符替换为你的真实值；**勿将填好的 `.env` 提交到版本库**。
+
 ```bash
-cp backend/.env.example .env         # 编辑填入各 AI 模型 Key + Supabase DATABASE_URL
-docker compose up -d                 # 前端 :3002 → 容器 80；后端仅内部暴露 :8000
-docker compose logs -f backend       # 实时查看后端日志
+cp .env.example .env                  # 编辑：AI Key、DATABASE_URL、JWT_SECRET 等
+docker compose up -d                 # 浏览器访问前端 http://localhost:3002（映射到容器内 Nginx :80）
+docker compose logs -f backend       # 后端日志（默认不对外暴露 8000，经前端反代 /api、/socket.io、/docs）
 ```
 
 ### 方式四：Coolify / 单容器生产部署
@@ -150,12 +175,15 @@ docker compose -f docker-compose.coolify.yml up -d --build
 ```
 
 **部署注意**：
-- 必须先在 Supabase 跑完 4 个 SQL 脚本（见上方快速开始）
+- 必须先在 Supabase 按顺序跑完上述 **7** 个 SQL 脚本（见上方快速开始）；**建议**再执行一次可选的 **`supabase_safe_run.sql`** 做 `access_level` 保守加固（见第 8 步说明）
+- 单容器构建见根目录 `Dockerfile`：需 **BuildKit**；Coolify / CI 失败时可 `DOCKER_BUILDKIT=1 docker compose -f docker-compose.coolify.yml build --no-cache`
 - `DATABASE_URL` 推荐 Transaction Pooler (端口 6543) 以获得最佳并发
 - 多实例横向扩容时，`queue_jobs` 表自动在实例间分派任务（`SELECT FOR UPDATE SKIP LOCKED`），无需额外配置
 - Coolify 更新镜像失败时，使用「Force rebuild (no cache)」避免 pip 层缓存
 
-## 环境变量 (backend/.env)
+## 环境变量 (`.env`)
+
+本地从 `backend/` 启动时，配置写在 [`backend/.env`](backend/.env.example)（可自 [.env.example](.env.example) / [`backend/.env.example`](backend/.env.example) 复制）。使用 **docker compose** 时，Compose 读取**仓库根目录**的 [`.env`](.env.example)，键名与后端一致。前端本地开发可选变量见 [`frontend/.env.example`](frontend/.env.example)。
 
 ### AI 模型（至少配置一个）
 
@@ -187,6 +215,8 @@ docker compose -f docker-compose.coolify.yml up -d --build
 |------|------|------|
 | `JWT_SECRET` | JWT 签名密钥（生产环境必须更改） | — |
 | `BANNER_TEXT` | 系统公告文本（留空不显示） | 空 |
+| `APP_ENV` / `APP_DEBUG` / `LOG_LEVEL` | 运行环境与日志级别（可选，见 `.env.example`） | development / true / INFO |
+| `PDF_CJK_FONT_PATH` | PDF 导出用 CJK 字体绝对路径（可选） | 空 |
 
 ### 队列与并发（Postgres-backed）
 
@@ -212,17 +242,7 @@ docker compose -f docker-compose.coolify.yml up -d --build
 | `DB_IDLE_TX_TIMEOUT_MS` | 事务空闲超时（毫秒） | 300000 |
 | `DB_COMMAND_TIMEOUT_SEC` | asyncpg 客户端单命令超时（秒） | 180 |
 
-## 预置账号
 
-系统启动时会自动创建以下账号（不开放注册）：
-
-| 用户名 | 密码 |
-|--------|------|
-| lzf | lzf122406 |
-| ys | yellowsea |
-| zhkj | zhkj1234 |
-| zhkj123 | zhkj123 |
-| zhkj456 | zhkj456 |
 
 ## 并发、队列与数据库性能
 
@@ -241,10 +261,11 @@ docker compose -f docker-compose.coolify.yml up -d --build
 
 ## 环境要求
 
-- Python 3.11+
+- Python 3.11+（推荐 Conda 独立环境；`pip` 可使用阿里云等国内镜像加速，与 [`backend/requirements.txt`](backend/requirements.txt) 一致）
 - Node.js 18+
 - 一个 Supabase 项目（免费版即可）
 - 至少配置一个 AI 模型的 API Key
+- **Docker（可选，用于方式三 / 四）**：Docker Engine **24+**（或旧版需开启 **BuildKit**）、**Compose V2**（`docker compose`）；镜像构建建议 **4GB+** 内存；Windows 推荐 Docker Desktop + **WSL2**
 
 ## 数据库
 
@@ -271,6 +292,17 @@ docker compose -f docker-compose.coolify.yml up -d --build
 
 4. **大学年级扩展** —— `supabase_university_migration.sql`
    - 为 `lesson_series` / `lesson_plans` 新增大学专用字段（专业、必修/选修、教学进度等）
+
+5. **文档与导出** —— `supabase_documents_migration.sql`
+   - `document_versions`、`export_records` 等（可编辑教案文档、导出记录）
+
+6. **课程工具异步状态** —— `supabase_course_tools_async_migration.sql`
+   - 为 `course_tool_results` 增加 `status` / `error_message` / `updated_at` 等
+
+7. **RBAC** —— `supabase_user_access_level_migration.sql`
+   - 为 `users` 增加 `access_level`（如管理员与普通/受限角色），与应用内权限判断一致
+
+8. **（可选）`access_level` 加固** —— 与上方「快速开始」第 8 步相同：推荐 **`supabase_safe_run.sql`**；或 **`supabase_admin_scope_migration.sql`**（含代管/RLS 说明与校验）
 
 所有脚本都是 `CREATE ... IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`，可**重复执行**，不会报错。
 
@@ -326,7 +358,7 @@ docker compose -f docker-compose.coolify.yml up -d --build
 
 ## API 端点
 
-本地开发：后端在 3002 时访问 `http://localhost:3002/docs` 查看 Swagger；Docker 映射为 `http://localhost:8001/docs`。
+本地开发：后端在 3002 时访问 `http://localhost:3002/docs` 查看 Swagger。Docker Compose 双容器模式下，前端 Nginx 反代 `/docs` 到后端，请使用 `http://localhost:3002/docs`（与对外端口一致）；若单独暴露后端端口，再在宿主机选用自定义端口访问。
 
 ### 认证
 

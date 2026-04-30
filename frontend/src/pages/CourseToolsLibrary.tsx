@@ -20,6 +20,7 @@ import {
   Clock,
   Eye,
   Layers,
+  X,
 } from 'lucide-react'
 
 type ToolType = 'outline' | 'ppt' | 'exercises' | 'practice'
@@ -49,6 +50,8 @@ export default function CourseToolsLibrary() {
   const [searchParams, setSearchParams] = useSearchParams()
   const highlightId = searchParams.get('highlight') || ''
   const highlightTool = (searchParams.get('tool') || '') as ToolType | ''
+  const forUserId = searchParams.get('for_user_id') || ''
+  const scopeParams = forUserId ? { for_user_id: forUserId } : undefined
   const [items, setItems] = useState<LibItem[]>([])
   const [loading, setLoading] = useState(false)
   const [tab, setTab] = useState<Tab>(
@@ -64,7 +67,9 @@ export default function CourseToolsLibrary() {
   const load = async () => {
     setLoading(true)
     try {
-      const res = await api.get('/api/v1/course-tools/history', { params: { limit: 500 } })
+      const res = await api.get('/api/v1/course-tools/history', {
+        params: { limit: 500, ...(scopeParams || {}) },
+      })
       setItems(res.data as LibItem[])
     } catch (e: any) {
       toast.error(e?.response?.data?.detail || t('tools.load_failed'))
@@ -73,11 +78,17 @@ export default function CourseToolsLibrary() {
     }
   }
 
+  const clearScopeFilter = () => {
+    const params = new URLSearchParams(searchParams)
+    params.delete('for_user_id')
+    setSearchParams(params, { replace: true })
+  }
+
   useEffect(() => {
     bindSocket()
     load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [forUserId])
 
   // Refresh when jobs list changes (job completed → new data available)
   useEffect(() => {
@@ -130,13 +141,14 @@ export default function CourseToolsLibrary() {
   }, [items, tab])
 
   const handleView = (it: LibItem) => {
-    navigate(`/course-tools?tab=${it.tool_type}&result_id=${it.id}`)
+    const base = `/course-tools?tab=${it.tool_type}&result_id=${it.id}`
+    navigate(forUserId ? `${base}&for_user_id=${encodeURIComponent(forUserId)}` : base)
   }
 
   const handleDelete = async (it: LibItem) => {
     if (!window.confirm(t('tools.confirm_delete'))) return
     try {
-      await api.delete(`/api/v1/course-tools/results/${it.id}`)
+      await api.delete(`/api/v1/course-tools/results/${it.id}`, { params: scopeParams })
       setItems((prev) => prev.filter((p) => p.id !== it.id))
       toast.success(t('tools.delete_success'))
     } catch (e: any) {
@@ -146,7 +158,10 @@ export default function CourseToolsLibrary() {
 
   const downloadBlob = async (url: string, fallback: string) => {
     try {
-      const res = await api.get(url, { responseType: 'blob' })
+      const res = await api.get(url, {
+        params: scopeParams,
+        responseType: 'blob',
+      })
       const objectUrl = URL.createObjectURL(res.data)
       const disp = res.headers['content-disposition'] || ''
       const m = disp.match(/filename\*?=(?:UTF-8'')?([^;\s]+)/i)
@@ -198,6 +213,20 @@ export default function CourseToolsLibrary() {
           <span>/</span>
           <span className="text-gray-900 font-medium">{t('tools.library_title')}</span>
         </div>
+
+        {forUserId ? (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-950">
+            <span>{t('admin.docs_scope_hint').replace('{id}', forUserId)}</span>
+            <button
+              type="button"
+              onClick={clearScopeFilter}
+              className="inline-flex items-center gap-1 text-amber-800 hover:text-amber-950 font-medium"
+            >
+              <X className="w-4 h-4" />
+              {t('admin.clear_scope')}
+            </button>
+          </div>
+        ) : null}
 
         <div className="flex items-center justify-between mb-6">
           <div>

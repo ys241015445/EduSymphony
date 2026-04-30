@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
-import { useParams, useNavigate, Link } from 'react-router-dom'
-import { useLessonStore } from '../stores/lessonStore'
+import { useEffect, useState, useMemo } from 'react'
+import { useParams, useNavigate, Link, useSearchParams } from 'react-router-dom'
+import { useLessonStore, LessonsScope } from '../stores/lessonStore'
 import { api } from '../services/api'
 import Header from '../components/layout/Header'
 import Button from '../components/ui/Button'
@@ -14,14 +14,21 @@ type ViewMode = 'optimized' | 'draft' | 'stages'
 export default function LessonResult() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const forUserId = searchParams.get('for_user_id') || undefined
+  const lessonScope = useMemo<LessonsScope | undefined>(
+    () => (forUserId ? { for_user_id: forUserId } : undefined),
+    [forUserId],
+  )
+  const scopeQs = forUserId ? `?for_user_id=${encodeURIComponent(forUserId)}` : ''
   const t = useT()
   const { currentLesson, fetchLesson } = useLessonStore()
   const [activeStage, setActiveStage] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>('optimized')
 
   useEffect(() => {
-    if (id) fetchLesson(id)
-  }, [id, fetchLesson])
+    if (id) fetchLesson(id, lessonScope)
+  }, [id, forUserId, fetchLesson])
 
   // 仅在教案 id 变化（即载入一份新教案）时初始化默认 viewMode，
   // 避免用户在 stages 视图里点章节时被重置回 optimized 视图。
@@ -63,19 +70,21 @@ export default function LessonResult() {
 
   const handleExport = async (format: string) => {
     try {
-      const res = await api.get(`/api/v1/export/${format}/${id}`, { responseType: 'blob' })
+      let exportUrl = `/api/v1/export/${format}/${id}`
+      if (forUserId) exportUrl += `?for_user_id=${encodeURIComponent(forUserId)}`
+      const res = await api.get(exportUrl, { responseType: 'blob' })
       const blob = new Blob([res.data], {
         type: format === 'json' ? 'application/json;charset=utf-8' : 'text/plain;charset=utf-8',
       })
-      const url = URL.createObjectURL(blob)
+      const blobUrl = URL.createObjectURL(blob)
       const a = document.createElement('a')
-      a.href = url
+      a.href = blobUrl
       const safeName = (currentLesson.title || 'lesson_plan').replace(/[<>:"/\\|?*]/g, '_')
       a.download = `${safeName}.${format}`
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
-      URL.revokeObjectURL(url)
+      URL.revokeObjectURL(blobUrl)
     } catch (err: any) {
       const detail = err?.message?.trim?.() || ''
       const msg =
@@ -97,7 +106,7 @@ export default function LessonResult() {
         {/* Top header */}
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-4">
-            <button onClick={() => navigate('/dashboard')} className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-700">
+            <button onClick={() => navigate(scopeQs ? `/dashboard${scopeQs}` : '/dashboard')} className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-700">
               <ArrowLeft className="w-4 h-4" />
               {t('result.back')}
             </button>
@@ -118,7 +127,7 @@ export default function LessonResult() {
               <FileText className="w-4 h-4 mr-1.5" />
               TXT
             </Button>
-            <Link to={`/lesson/${id}/process`}>
+            <Link to={`/lesson/${id}/process${scopeQs}`}>
               <Button variant="ghost" size="sm">
                 <Eye className="w-4 h-4 mr-1.5" />
                 {t('result.view_process')}
@@ -240,6 +249,8 @@ export default function LessonResult() {
             <TeachingFeedback
               lessonId={currentLesson.id}
               lessonTitle={currentLesson.title}
+              scopeQs={scopeQs}
+              forUserId={forUserId}
             />
           </Card>
         )}

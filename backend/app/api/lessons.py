@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import Optional, List
@@ -8,7 +8,7 @@ import aiofiles
 from loguru import logger
 
 from app.core.config import settings
-from app.core.deps import get_db, get_current_active_user
+from app.core.deps import get_db, get_current_active_user, resolve_documents_owner
 from app.models.user import User
 from app.models.lesson import LessonPlan, LessonStatus, Discussion, Annotation
 from app.schemas.lesson import (
@@ -17,6 +17,29 @@ from app.schemas.lesson import (
 )
 
 router = APIRouter(prefix="/lessons", tags=["教案"])
+
+
+def _quota_exhausted_detail(for_user_id: Optional[str], current_user: User) -> str:
+    if for_user_id and str(for_user_id).strip() and str(for_user_id).strip() != current_user.id:
+        return "目标用户配额已用完"
+    return "配额已用完"
+
+
+async def _require_owned_lesson(
+    db: AsyncSession,
+    current_user: User,
+    for_user_id: Optional[str],
+    lesson_id: str,
+) -> tuple[User, LessonPlan]:
+    """Resolve scope owner and load lesson; 404 if not owned by owner."""
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    result = await db.execute(
+        select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == owner.id)
+    )
+    lesson = result.scalar_one_or_none()
+    if not lesson:
+        raise HTTPException(status_code=404, detail="教案不存在")
+    return owner, lesson
 
 
 @router.post("", response_model=LessonResponse, status_code=201)
@@ -39,15 +62,17 @@ async def create_lesson(
     locale: str = Form("zh-CN"),
     parent_lesson_id: Optional[str] = Form(None),
     teacher_feedback: Optional[str] = Form(None),
+    for_user_id: Optional[str] = Query(None, description="管理员：以指定用户身份创建教案并扣其配额"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    if current_user.quota_remaining <= 0:
-        raise HTTPException(status_code=403, detail="配额已用完")
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    if owner.quota_remaining <= 0:
+        raise HTTPException(status_code=403, detail=_quota_exhausted_detail(for_user_id, current_user))
 
     parsed_content = None
     if source_type == "upload" and file:
-        user_dir = os.path.join(settings.FILES_DIR, current_user.id)
+        user_dir = os.path.join(settings.FILES_DIR, owner.id)
         os.makedirs(user_dir, exist_ok=True)
         file_path = os.path.join(user_dir, f"{uuid.uuid4()}_{file.filename}")
         async with aiofiles.open(file_path, "wb") as f:
@@ -67,7 +92,7 @@ async def create_lesson(
 
     lesson = LessonPlan(
         id=str(uuid.uuid4()),
-        user_id=current_user.id,
+        user_id=owner.id,
         title=title,
         subject=subject,
         grade_level=grade_level,
@@ -87,7 +112,7 @@ async def create_lesson(
         status=LessonStatus.QUEUED.value,
     )
     db.add(lesson)
-    current_user.quota_remaining -= 1
+    owner.quota_remaining -= 1
     await db.commit()
     await db.refresh(lesson)
 
@@ -95,7 +120,7 @@ async def create_lesson(
     is_quick = mode == "quick"
     await enqueue(
         lesson.id,
-        user_id=str(current_user.id),
+        user_id=str(owner.id),
         kind="lesson_quick" if is_quick else "lesson",
     )
     logger.info(f"Enqueued {'quick' if is_quick else 'full'} lesson job for {lesson.id}")
@@ -109,6 +134,7 @@ async def list_lessons(
     limit: int = 20,
     offset: int = 0,
     cursor: Optional[str] = None,
+    for_user_id: Optional[str] = Query(None, description="管理员：列出指定用户的教案"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -120,8 +146,9 @@ async def list_lessons(
     - offset：兼容老版本；深分页 (offset > 1000) 时建议改用 cursor
     """
     safe_limit = max(1, min(limit, 100))
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
 
-    query = select(LessonPlan).where(LessonPlan.user_id == current_user.id)
+    query = select(LessonPlan).where(LessonPlan.user_id == owner.id)
     if status:
         query = query.where(LessonPlan.status == status)
 
@@ -137,17 +164,40 @@ async def list_lessons(
         query = query.order_by(LessonPlan.created_at.desc()).limit(safe_limit).offset(max(0, offset))
 
     result = await db.execute(query)
-    return [LessonListResponse.model_validate(l) for l in result.scalars().all()]
+
+    out: List[LessonListResponse] = []
+    for l in result.scalars().all():
+        fc = l.final_content if isinstance(l.final_content, dict) else {}
+        stages = fc.get("stages") or {}
+        has_stages = bool(isinstance(stages, dict) and len(stages) > 0)
+        has_full_optimized = bool(fc.get("full_optimized"))
+        item = LessonListResponse(
+            id=l.id,
+            title=l.title,
+            subject=l.subject,
+            grade_level=l.grade_level,
+            status=l.status,
+            progress=l.progress or 0,
+            teaching_model_id=l.teaching_model_id,
+            created_at=l.created_at,
+            mode=getattr(l, "mode", None) or fc.get("mode"),
+            has_full_optimized=has_full_optimized,
+            has_stages=has_stages,
+        )
+        out.append(item)
+    return out
 
 
 @router.get("/{lesson_id}", response_model=LessonResponse)
 async def get_lesson(
     lesson_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：读取指定用户的教案"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
     result = await db.execute(
-        select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == current_user.id)
+        select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == owner.id)
     )
     lesson = result.scalar_one_or_none()
     if not lesson:
@@ -158,11 +208,13 @@ async def get_lesson(
 @router.delete("/{lesson_id}", status_code=204)
 async def delete_lesson(
     lesson_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：删除指定用户的教案"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
     result = await db.execute(
-        select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == current_user.id)
+        select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == owner.id)
     )
     lesson = result.scalar_one_or_none()
     if not lesson:
@@ -174,11 +226,13 @@ async def delete_lesson(
 @router.get("/{lesson_id}/discussions", response_model=List[DiscussionResponse])
 async def get_discussions(
     lesson_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：查看指定用户教案的讨论"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
     owner_check = await db.execute(
-        select(LessonPlan.id).where(LessonPlan.id == lesson_id, LessonPlan.user_id == current_user.id)
+        select(LessonPlan.id).where(LessonPlan.id == lesson_id, LessonPlan.user_id == owner.id)
     )
     if not owner_check.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="教案不存在")
@@ -192,14 +246,11 @@ async def get_discussions(
 async def create_annotation(
     lesson_id: str,
     data: AnnotationCreate,
+    for_user_id: Optional[str] = Query(None, description="管理员：批注落在指定用户的教案上"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    owner_check = await db.execute(
-        select(LessonPlan.id).where(LessonPlan.id == lesson_id, LessonPlan.user_id == current_user.id)
-    )
-    if not owner_check.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="教案不存在")
+    await _require_owned_lesson(db, current_user, for_user_id, lesson_id)
 
     annotation = Annotation(
         id=str(uuid.uuid4()),
@@ -218,13 +269,20 @@ async def create_annotation(
 @router.get("/{lesson_id}/annotations", response_model=List[AnnotationResponse])
 async def get_annotations(
     lesson_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：查看指定用户教案的批注"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    lesson_ok = await db.execute(
+        select(LessonPlan.id).where(LessonPlan.id == lesson_id, LessonPlan.user_id == owner.id)
+    )
+    if not lesson_ok.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="教案不存在")
+
     result = await db.execute(
         select(Annotation).where(
             Annotation.lesson_plan_id == lesson_id,
-            Annotation.user_id == current_user.id,
         ).order_by(Annotation.created_at)
     )
     return [AnnotationResponse.model_validate(a) for a in result.scalars().all()]
@@ -233,36 +291,30 @@ async def get_annotations(
 @router.post("/{lesson_id}/regenerate-draft")
 async def regenerate_draft(
     lesson_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：为指定用户重新生成教案"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """Regenerate the full draft and restart the entire process."""
-    owner_check = await db.execute(
-        select(LessonPlan.id).where(LessonPlan.id == lesson_id, LessonPlan.user_id == current_user.id)
-    )
-    if not owner_check.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="教案不存在")
+    owner, _ = await _require_owned_lesson(db, current_user, for_user_id, lesson_id)
 
     from app.tasks.queue_manager import enqueue
-    await enqueue(lesson_id, user_id=str(current_user.id), kind="regenerate_full")
+    await enqueue(lesson_id, user_id=str(owner.id), kind="regenerate_full")
     return {"status": "ok", "message": "初步教案重新生成已启动"}
 
 
 @router.post("/{lesson_id}/regenerate-optimized")
 async def regenerate_optimized_endpoint(
     lesson_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：为指定用户二次优化"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """Re-optimize the lesson plan based on existing draft and discussions."""
-    owner_check = await db.execute(
-        select(LessonPlan.id).where(LessonPlan.id == lesson_id, LessonPlan.user_id == current_user.id)
-    )
-    if not owner_check.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="教案不存在")
+    owner, _ = await _require_owned_lesson(db, current_user, for_user_id, lesson_id)
 
     from app.tasks.queue_manager import enqueue
-    await enqueue(lesson_id, user_id=str(current_user.id), kind="regenerate_optimized")
+    await enqueue(lesson_id, user_id=str(owner.id), kind="regenerate_optimized")
     return {"status": "ok", "message": "二次优化已启动"}
 
 
@@ -271,14 +323,11 @@ async def regenerate_stage(
     lesson_id: str,
     stage_key: str,
     version: str = "draft",
+    for_user_id: Optional[str] = Query(None, description="管理员：为指定用户重生成阶段"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    owner_check = await db.execute(
-        select(LessonPlan.id).where(LessonPlan.id == lesson_id, LessonPlan.user_id == current_user.id)
-    )
-    if not owner_check.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="教案不存在")
+    await _require_owned_lesson(db, current_user, for_user_id, lesson_id)
 
     from app.tasks.lesson_task import LessonTaskHandler
     handler = LessonTaskHandler()
@@ -293,14 +342,11 @@ async def regenerate_stage(
 async def regenerate_discussion(
     lesson_id: str,
     discussion_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：为指定用户重生成讨论"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    owner_check = await db.execute(
-        select(LessonPlan.id).where(LessonPlan.id == lesson_id, LessonPlan.user_id == current_user.id)
-    )
-    if not owner_check.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="教案不存在")
+    await _require_owned_lesson(db, current_user, for_user_id, lesson_id)
 
     disc_result = await db.execute(
         select(Discussion).where(Discussion.id == discussion_id, Discussion.lesson_plan_id == lesson_id)
@@ -390,16 +436,12 @@ async def regenerate_discussion(
 @router.post("/{lesson_id}/confirm-step")
 async def confirm_step(
     lesson_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：为指定用户确认继续"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """Confirm current step in semi-auto mode to proceed to the next phase."""
-    result = await db.execute(
-        select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == current_user.id)
-    )
-    lesson = result.scalar_one_or_none()
-    if not lesson:
-        raise HTTPException(status_code=404, detail="教案不存在")
+    owner, lesson = await _require_owned_lesson(db, current_user, for_user_id, lesson_id)
     if lesson.status != LessonStatus.AWAITING_CONFIRMATION.value:
         raise HTTPException(status_code=400, detail="当前不在等待确认状态")
 
@@ -409,7 +451,7 @@ async def confirm_step(
     # 所有 phase 分支都落到 kind="continue"，由 job_handlers._continue_dispatcher
     # 根据 DB 里的 current_phase 路由到对应 continue_xxx 方法。
     from app.tasks.queue_manager import enqueue
-    await enqueue(lesson_id, user_id=str(current_user.id), kind="continue")
+    await enqueue(lesson_id, user_id=str(owner.id), kind="continue")
     return {"status": "ok", "message": "已确认，继续生成"}
 
 
@@ -417,16 +459,12 @@ async def confirm_step(
 async def submit_feedback(
     lesson_id: str,
     feedback: str = Form(...),
+    for_user_id: Optional[str] = Query(None, description="管理员：写入指定用户教案的反馈"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """Submit teacher feedback for a completed lesson."""
-    result = await db.execute(
-        select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == current_user.id)
-    )
-    lesson = result.scalar_one_or_none()
-    if not lesson:
-        raise HTTPException(status_code=404, detail="教案不存在")
+    _, lesson = await _require_owned_lesson(db, current_user, for_user_id, lesson_id)
 
     lesson.teacher_feedback = feedback
     await db.commit()
@@ -439,24 +477,23 @@ async def generate_next_lesson(
     title: str = Form(...),
     topic: Optional[str] = Form(None),
     teacher_feedback: Optional[str] = Form(None),
+    for_user_id: Optional[str] = Query(None, description="管理员：以指定用户身份生成下一课并扣其配额"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """Generate a follow-up lesson based on the previous one and teacher feedback."""
-    result = await db.execute(
-        select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == current_user.id)
-    )
-    parent = result.scalar_one_or_none()
-    if not parent:
-        raise HTTPException(status_code=404, detail="上一课教案不存在")
+    owner, parent = await _require_owned_lesson(db, current_user, for_user_id, lesson_id)
 
     if teacher_feedback and not parent.teacher_feedback:
         parent.teacher_feedback = teacher_feedback
         await db.commit()
 
+    if owner.quota_remaining <= 0:
+        raise HTTPException(status_code=403, detail=_quota_exhausted_detail(for_user_id, current_user))
+
     new_lesson = LessonPlan(
         id=str(uuid.uuid4()),
-        user_id=current_user.id,
+        user_id=owner.id,
         title=title,
         subject=parent.subject,
         grade_level=parent.grade_level,
@@ -477,12 +514,11 @@ async def generate_next_lesson(
         status=LessonStatus.QUEUED.value,
     )
     db.add(new_lesson)
-    if current_user.quota_remaining > 0:
-        current_user.quota_remaining -= 1
+    owner.quota_remaining -= 1
     await db.commit()
     await db.refresh(new_lesson)
 
     from app.tasks.queue_manager import enqueue
-    await enqueue(new_lesson.id, user_id=str(current_user.id), kind="lesson_copy")
+    await enqueue(new_lesson.id, user_id=str(owner.id), kind="lesson_copy")
 
     return LessonResponse.model_validate(new_lesson)

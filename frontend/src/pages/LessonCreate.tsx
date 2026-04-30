@@ -1,6 +1,6 @@
-import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { useLessonStore } from '../stores/lessonStore'
+import { useState, useMemo } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useLessonStore, LessonsScope } from '../stores/lessonStore'
 import { useLanguageStore } from '../stores/languageStore'
 import { useT } from '../i18n/translations'
 import Header from '../components/layout/Header'
@@ -92,6 +92,13 @@ const CATEGORY_STYLES: Record<string, { badge: string; pill: string; pillActive:
 
 export default function LessonCreate() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const forUserId = searchParams.get('for_user_id') || undefined
+  const lessonScope = useMemo<LessonsScope | undefined>(
+    () => (forUserId ? { for_user_id: forUserId } : undefined),
+    [forUserId],
+  )
+  const scopeQs = forUserId ? `?for_user_id=${encodeURIComponent(forUserId)}` : ''
   const t = useT()
   const { createLesson } = useLessonStore()
 
@@ -162,8 +169,8 @@ export default function LessonCreate() {
       } else if (file) {
         form.append('file', file)
       }
-      const lessonId = await createLesson(form)
-      navigate(`/lesson/${lessonId}/process`)
+      const lessonId = await createLesson(form, lessonScope)
+      navigate(`/lesson/${lessonId}/process${scopeQs}`)
     } catch (err: any) {
       setError(err.response?.data?.detail || t('create.error_create'))
     } finally {

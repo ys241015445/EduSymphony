@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { useLessonStore } from '../stores/lessonStore'
+import { useState, useEffect, useRef, useMemo } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useLessonStore, LessonsScope } from '../stores/lessonStore'
 import { getSocket, joinLesson, leaveLesson } from '../services/socket'
 import { useAuthStore } from '../stores/authStore'
 import { useLanguageStore } from '../stores/languageStore'
@@ -12,6 +12,14 @@ import { ArrowLeft, Zap, Loader2, CheckCircle2, Eye } from 'lucide-react'
 
 export default function QuickGenerate() {
   const t = useT()
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const forUserId = searchParams.get('for_user_id') || undefined
+  const lessonScope = useMemo<LessonsScope | undefined>(
+    () => (forUserId ? { for_user_id: forUserId } : undefined),
+    [forUserId],
+  )
+  const scopeQs = forUserId ? `?for_user_id=${encodeURIComponent(forUserId)}` : ''
   const EXPORT_FORMATS = [
     { key: 'json', label: t('process.export_json'), icon: '{ }' },
     { key: 'txt', label: t('process.export_txt'), icon: 'Aa' },
@@ -19,7 +27,6 @@ export default function QuickGenerate() {
     { key: 'docx', label: t('process.export_word'), icon: 'W' },
     { key: 'pdf', label: t('process.export_pdf'), icon: 'Pdf' },
   ]
-  const navigate = useNavigate()
   const { createLesson, fetchLesson, currentLesson } = useLessonStore()
 
   const [topic, setTopic] = useState('')
@@ -53,7 +60,7 @@ export default function QuickGenerate() {
       form.append('source_content', topic)
       form.append('mode', 'quick')
       form.append('locale', useLanguageStore.getState().locale)
-      const id = await createLesson(form)
+      const id = await createLesson(form, lessonScope)
       setLessonId(id)
     } catch (err: any) {
       setError(err.response?.data?.detail || t('quick.create_failed'))
@@ -63,8 +70,8 @@ export default function QuickGenerate() {
 
   useEffect(() => {
     if (!lessonId) return
-    fetchLesson(lessonId)
-  }, [lessonId, fetchLesson])
+    fetchLesson(lessonId, lessonScope)
+  }, [lessonId, lessonScope, fetchLesson])
 
   useEffect(() => {
     if (!lessonId) return
@@ -145,7 +152,9 @@ export default function QuickGenerate() {
     setExporting(format)
     try {
       const token = useAuthStore.getState().token
-      const res = await fetch(`/api/v1/export/${format}/${lessonId}`, {
+      let exportUrl = `/api/v1/export/${format}/${lessonId}`
+      if (forUserId) exportUrl += `?for_user_id=${encodeURIComponent(forUserId)}`
+      const res = await fetch(exportUrl, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       })
       if (!res.ok) {
@@ -177,7 +186,7 @@ export default function QuickGenerate() {
     <div className="min-h-screen bg-gray-50">
       <Header />
       <main className="max-w-4xl mx-auto px-6 py-8">
-        <button onClick={() => navigate('/dashboard')} className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-700 mb-6">
+        <button onClick={() => navigate(scopeQs ? `/dashboard${scopeQs}` : '/dashboard')} className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-700 mb-6">
           <ArrowLeft className="w-4 h-4" />
           {t('quick.back')}
         </button>
@@ -328,7 +337,7 @@ export default function QuickGenerate() {
                   <Zap className="w-4 h-4 mr-1.5" />
                   {t('quick.generate_another')}
                 </Button>
-                <Button onClick={() => navigate(`/lesson/${lessonId}/process`)}>
+                <Button onClick={() => navigate(`/lesson/${lessonId}/process${scopeQs}`)}>
                   <Eye className="w-4 h-4 mr-1.5" />
                   {t('quick.view_full')}
                 </Button>

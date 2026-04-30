@@ -1,30 +1,35 @@
-import { useEffect, useState, useMemo } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../services/api'
+import { getSocket, joinUser } from '../services/socket'
+import { useAuthStore } from '../stores/authStore'
 import Header from '../components/layout/Header'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
 import PPTPanel from '../components/course/PPTPanel'
 import SourcePicker, { SourceRef, applySourceToFormData } from '../components/course/SourcePicker'
+import { toast } from '../components/ui/Toast'
 import {
-  GraduationCap, ArrowLeft, Play, Loader2, CheckCircle2, Clock, AlertCircle,
-  Download, FileDown, Package, FileText, Sparkles,
+  GraduationCap, ArrowLeft, Loader2, CheckCircle2, Clock, AlertCircle,
+  Download, FileText, Sparkles, RotateCcw, BookOpen, FileEdit,
 } from 'lucide-react'
 import { useT } from '../i18n/translations'
+import { parseAccessLevel, isLimited } from '../lib/access'
+import {
+  useGenerationStats, GenerationStatusCard, SyllabusPreviewCard,
+  MyDocsQuickAccessCard, ExportTab, ScheduleStat,
+  type SharedSeriesLite, type SharedSeriesLesson,
+} from '../components/series/SharedDashboardParts'
 
 type TabKey = 'overview' | 'lessons' | 'exercises' | 'ppt' | 'export'
 
-interface SeriesData {
-  id: string
-  title: string
+interface SeriesData extends SharedSeriesLite {
   subject: string
   grade_level: string
   education_level?: string
   major?: string
   course_type?: string
   course_nature?: string
-  total_weeks: number
-  lessons_per_week: number
   objectives?: string
   quality_goals?: string
   special_requirements?: string
@@ -35,12 +40,9 @@ interface SeriesData {
       content_outline: string; objectives?: string
     }>
   }
-  status: string
 }
 
-interface SeriesLesson {
-  id: string; title: string; status: string; progress: number; sequence_order: number
-}
+type SeriesLesson = SharedSeriesLesson
 
 type ExType = 'in_class' | 'homework' | 'quiz' | 'project'
 type ExDiff = 'easy' | 'medium' | 'hard' | 'mixed'
@@ -49,52 +51,153 @@ type ExMode = 'exercises' | 'practice'
 export default function UniversityDashboard() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const forUserId = searchParams.get('for_user_id') || undefined
+  const seriesReadParams = forUserId ? { for_user_id: forUserId } : {}
+  const dashBack = forUserId ? `/dashboard?for_user_id=${encodeURIComponent(forUserId)}` : '/dashboard'
   const t = useT()
+  const userId = useAuthStore((s) => s.user?.id)
+  const limitedUser = isLimited(parseAccessLevel(useAuthStore((s) => s.user?.access_level)))
   const [tab, setTab] = useState<TabKey>('overview')
   const [series, setSeries] = useState<SeriesData | null>(null)
   const [lessons, setLessons] = useState<SeriesLesson[]>([])
-  const [generating, setGenerating] = useState(false)
+  const [enqueueing, setEnqueueing] = useState(false)
+  const [retrying, setRetrying] = useState(false)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
+  const stats = useGenerationStats(series, lessons)
+  const allDoneRef = useRef(false)
+  allDoneRef.current = stats.allDone
+
+  const load = useCallback(async () => {
+    if (!id) return
+    try {
+      const [sr, lr] = await Promise.all([
+        api.get(`/api/v1/series/${id}`, { params: seriesReadParams }),
+        api.get(`/api/v1/series/${id}/lessons`, { params: seriesReadParams }),
+      ])
+      setSeries(sr.data)
+      setLessons(lr.data)
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setLoading(false)
+    }
+  }, [id, forUserId])
 
   useEffect(() => {
     if (!id) return
-    const load = async () => {
-      try {
-        const [sr, lr] = await Promise.all([
-          api.get(`/api/v1/series/${id}`),
-          api.get(`/api/v1/series/${id}/lessons`),
-        ])
-        setSeries(sr.data)
-        setLessons(lr.data)
-      } catch (e) {
-        console.error(e)
-      } finally {
-        setLoading(false)
-      }
-    }
     load()
-    const timer = setInterval(load, 10000)
-    return () => clearInterval(timer)
-  }, [id])
+    if (userId) joinUser(userId)
+    const socket = getSocket()
 
-  const completedCount = lessons.filter(l => l.status === 'completed').length
-  const totalExpected = series ? series.total_weeks * series.lessons_per_week : 0
+    const onProgress = (data: any) => {
+      if (!data?.lesson_id) return
+      setLessons(prev => prev.map(l =>
+        l.id === data.lesson_id
+          ? { ...l, status: data.status || l.status, progress: data.progress ?? l.progress }
+          : l
+      ))
+    }
+    const onCompleted = (data: any) => {
+      if (!data?.lesson_id) return
+      setLessons(prev => prev.map(l =>
+        l.id === data.lesson_id ? { ...l, status: 'completed', progress: 100 } : l
+      ))
+      api.get(`/api/v1/series/${id}`, { params: seriesReadParams }).then(r => setSeries(r.data)).catch(() => {})
+    }
+    socket.on('progress_update', onProgress)
+    socket.on('lesson_completed', onCompleted)
+
+    const timer = setInterval(() => {
+      if (allDoneRef.current) return
+      load()
+    }, 30000)
+
+    return () => {
+      socket.off('progress_update', onProgress)
+      socket.off('lesson_completed', onCompleted)
+      clearInterval(timer)
+    }
+  }, [id, userId, load, forUserId])
 
   const handleGenerateAll = async () => {
     if (!id) return
-    setGenerating(true)
+    setEnqueueing(true)
     setErr('')
     try {
-      await api.post(`/api/v1/series/${id}/generate-all`)
-      const lr = await api.get(`/api/v1/series/${id}/lessons`)
-      setLessons(lr.data)
+      const res = await api.post(`/api/v1/series/${id}/generate-all`, null, {
+        params: forUserId ? { for_user_id: forUserId } : undefined,
+      })
+      const total = res.data?.total ?? 0
+      toast.success(t('university.batch_enqueued').replace('{n}', String(total)))
+      await load()
     } catch (e: any) {
-      setErr(e.response?.data?.detail || t('university.generate_all_failed'))
+      const msg = e.response?.data?.detail || t('university.generate_all_failed')
+      setErr(msg)
+      toast.error(msg)
     } finally {
-      setGenerating(false)
+      setEnqueueing(false)
     }
   }
+
+  const handleRetryFailed = async () => {
+    const failedLessons = lessons.filter(l => l.status === 'failed')
+    if (!failedLessons.length) return
+    setRetrying(true)
+    setErr('')
+    let ok = 0
+    for (const l of failedLessons) {
+      try {
+        await api.post(`/api/v1/lessons/${l.id}/regenerate-draft`, null, {
+          params: forUserId ? { for_user_id: forUserId } : undefined,
+        })
+        ok += 1
+      } catch (e) {
+        // continue
+      }
+    }
+    setRetrying(false)
+    toast.success(t('university.retry_done').replace('{n}', String(ok)).replace('{total}', String(failedLessons.length)))
+    await load()
+  }
+
+  const handleRetryOne = async (lessonId: string) => {
+    try {
+      await api.post(`/api/v1/lessons/${lessonId}/regenerate-draft`, null, {
+        params: forUserId ? { for_user_id: forUserId } : undefined,
+      })
+      toast.success(t('university.retry_one_success'))
+      setLessons(prev => prev.map(l => l.id === lessonId ? { ...l, status: 'queued', progress: 0 } : l))
+    } catch (e: any) {
+      toast.error(e.response?.data?.detail || t('university.retry_one_failed'))
+    }
+  }
+
+  const handleEditInDoc = async (lessonId: string) => {
+    try {
+      const res = await api.post(
+        `/api/v1/documents/lesson/${lessonId}/ensure-version`,
+        null,
+        { params: { source_kind: 'lesson_optimized', ...(forUserId ? { for_user_id: forUserId } : {}) } },
+      )
+      const vid = res.data?.version_id
+      if (vid) {
+        const p = new URLSearchParams()
+        if (forUserId) p.set('for_user_id', forUserId)
+        const qs = p.toString()
+        navigate(qs ? `/documents/version/${vid}?${qs}` : `/documents/version/${vid}`)
+      }
+    } catch (e: any) {
+      toast.error(e.response?.data?.detail || t('university.edit_in_doc_failed'))
+    }
+  }
+
+  useEffect(() => {
+    if (limitedUser && (tab === 'exercises' || tab === 'ppt')) {
+      setTab('overview')
+    }
+  }, [limitedUser, tab])
 
   if (loading) return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -111,39 +214,47 @@ export default function UniversityDashboard() {
     </div>
   )
 
-  const tabs: { key: TabKey; label: string; icon: any }[] = [
+  const tabsAll: { key: TabKey; label: string; icon: any }[] = [
     { key: 'overview', label: t('university.tab_overview'), icon: GraduationCap },
     { key: 'lessons', label: t('university.tab_lessons'), icon: FileText },
     { key: 'exercises', label: t('university.tab_exercises'), icon: Sparkles },
     { key: 'ppt', label: t('university.tab_ppt'), icon: Sparkles },
     { key: 'export', label: t('university.tab_export'), icon: Download },
   ]
+  const tabs = limitedUser
+    ? tabsAll.filter((x) => x.key !== 'exercises' && x.key !== 'ppt')
+    : tabsAll
+
+  const hasLessons = stats.totalExpected > 0 && (stats.completed + stats.processing + stats.queued + stats.failed) > 0
 
   return (
     <div className="min-h-screen bg-gray-50">
       <Header />
       <main className="max-w-6xl mx-auto px-6 py-8">
         <div className="flex items-center gap-3 mb-6">
-          <button onClick={() => navigate('/dashboard')} className="text-gray-400 hover:text-gray-600">
+          <button onClick={() => navigate(dashBack)} className="text-gray-400 hover:text-gray-600">
             <ArrowLeft className="w-5 h-5" />
           </button>
           <GraduationCap className="w-6 h-6 text-brand-600" />
-          <div>
-            <h1 className="text-xl font-bold text-gray-900">{series.title}</h1>
-            <p className="text-sm text-gray-500">
-              {series.subject} · {series.major} · {series.grade_level} · {series.total_weeks}{t('series.week_label')} × {series.lessons_per_week}/{t('series.per_week')} = {totalExpected}
+          <div className="min-w-0">
+            <h1 className="text-xl font-bold text-gray-900 truncate">{series.title}</h1>
+            <p className="text-sm text-gray-500 truncate">
+              {series.subject}
+              {series.major ? ` · ${series.major}` : ''}
+              {series.grade_level ? ` · ${series.grade_level}` : ''}
+              {` · ${series.total_weeks}${t('series.week_label')} × ${series.lessons_per_week}/${t('series.per_week')} = ${stats.totalExpected}`}
             </p>
           </div>
         </div>
 
         {err && <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600">{err}</div>}
 
-        <div className="flex gap-1 mb-6 border-b border-gray-200">
+        <div className="flex gap-1 mb-6 border-b border-gray-200 overflow-x-auto">
           {tabs.map(({ key, label, icon: Icon }) => (
             <button
               key={key}
               onClick={() => setTab(key)}
-              className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-all ${
+              className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-all whitespace-nowrap ${
                 tab === key
                   ? 'border-brand-500 text-brand-600'
                   : 'border-transparent text-gray-500 hover:text-gray-700'
@@ -155,11 +266,39 @@ export default function UniversityDashboard() {
         </div>
 
         {tab === 'overview' && (
-          <OverviewTab series={series} lessons={lessons} completedCount={completedCount}
-            generating={generating} onGenerateAll={handleGenerateAll} t={t} navigate={navigate} />
+          <div className="space-y-4">
+            <CourseInfoCard series={series} stats={stats} t={t} />
+            <GenerationStatusCard
+              series={series}
+              stats={stats}
+              hasLessons={hasLessons}
+              enqueueing={enqueueing}
+              retrying={retrying}
+              onGenerateAll={handleGenerateAll}
+              onRetryFailed={handleRetryFailed}
+              onGoExport={() => setTab('export')}
+              t={t}
+            />
+            <MyDocsQuickAccessCard seriesId={series.id} completed={stats.completed} forUserId={forUserId} t={t} />
+            <SyllabusPreviewCard
+              semesterOverview={series.syllabus?.semester_overview}
+              syllabus={series.syllabus?.lessons || []}
+              lessons={lessons}
+              onMore={() => setTab('lessons')}
+              t={t}
+            />
+          </div>
         )}
         {tab === 'lessons' && (
-          <LessonsTab series={series} lessons={lessons} navigate={navigate} t={t} />
+          <LessonsTab
+            series={series}
+            lessons={lessons}
+            navigate={navigate}
+            forUserId={forUserId}
+            onRetryOne={handleRetryOne}
+            onEditInDoc={handleEditInDoc}
+            t={t}
+          />
         )}
         {tab === 'exercises' && (
           <ExercisesTab lessons={lessons} series={series} seriesId={id!} t={t} />
@@ -168,80 +307,77 @@ export default function UniversityDashboard() {
           <PPTTab lessons={lessons} series={series} seriesId={id!} t={t} />
         )}
         {tab === 'export' && (
-          <ExportTab seriesId={id!} t={t} />
+          <ExportTab seriesId={id!} stats={stats} navigate={navigate} forUserId={forUserId} t={t} />
         )}
       </main>
     </div>
   )
 }
 
-function OverviewTab({ series, lessons, completedCount, generating, onGenerateAll, t, navigate }: any) {
+// ───────────────────────────────────────────────────────────────────
+// CourseInfoCard
+// ───────────────────────────────────────────────────────────────────
+function CourseInfoCard({
+  series, stats, t,
+}: { series: SeriesData; stats: ReturnType<typeof useGenerationStats>; t: (k: string) => string }) {
+  const items: { label: string; value: string | number }[] = [
+    { label: t('university.major_label'), value: series.major || '-' },
+    {
+      label: t('university.course_type_label'),
+      value: series.course_type ? t(`university.course_type_${series.course_type}`) : '-',
+    },
+    {
+      label: t('university.course_nature_label'),
+      value: series.course_nature ? t(`university.course_nature_${series.course_nature}`) : '-',
+    },
+    { label: t('university.grade_label'), value: series.grade_level || '-' },
+  ]
   return (
-    <div className="space-y-4">
-      <Card>
-        <h2 className="font-semibold text-gray-900 mb-3">{t('university.course_info')}</h2>
-        <div className="grid grid-cols-2 gap-3 text-sm">
-          <div><span className="text-gray-500">{t('university.major_label')}:</span> <span className="text-gray-900">{series.major || '-'}</span></div>
-          <div><span className="text-gray-500">{t('university.course_type_label')}:</span> <span className="text-gray-900">{series.course_type ? t(`university.course_type_${series.course_type}`) : '-'}</span></div>
-          <div><span className="text-gray-500">{t('university.course_nature_label')}:</span> <span className="text-gray-900">{series.course_nature ? t(`university.course_nature_${series.course_nature}`) : '-'}</span></div>
-          <div><span className="text-gray-500">{t('university.grade_label')}:</span> <span className="text-gray-900">{series.grade_level}</span></div>
-        </div>
-        {series.objectives && (
-          <div className="mt-4 pt-4 border-t border-gray-100">
-            <div className="text-sm text-gray-500 mb-1">{t('university.objectives_label')}</div>
-            <div className="text-sm text-gray-800 whitespace-pre-wrap">{series.objectives}</div>
+    <Card>
+      <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+        <BookOpen className="w-5 h-5 text-brand-600" />
+        {t('university.course_info')}
+      </h2>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        {items.map((it) => (
+          <div key={it.label} className="bg-gray-50 rounded-lg p-3">
+            <div className="text-xs text-gray-500 mb-1">{it.label}</div>
+            <div className="text-sm font-medium text-gray-900 truncate">{it.value}</div>
           </div>
-        )}
-        {series.special_requirements && (
-          <div className="mt-3">
-            <div className="text-sm text-gray-500 mb-1">{t('university.special_req_label')}</div>
-            <div className="text-sm text-gray-800 whitespace-pre-wrap">{series.special_requirements}</div>
-          </div>
-        )}
-      </Card>
-
-      {series.syllabus?.semester_overview && (
-        <Card>
-          <h2 className="font-semibold text-gray-900 mb-2">{t('series.overview')}</h2>
-          <p className="text-sm text-gray-600 leading-relaxed whitespace-pre-wrap">{series.syllabus.semester_overview}</p>
-        </Card>
-      )}
-
-      {series.status === 'generating_syllabus' && (
-        <Card>
-          <div className="flex items-center gap-3 text-brand-600">
-            <Loader2 className="w-5 h-5 animate-spin" />
-            <span className="text-sm font-medium">{t('series.generating_syllabus')}</span>
-          </div>
-        </Card>
-      )}
-
-      {series.status === 'syllabus_ready' && lessons.length === 0 && (
-        <div>
-          <Button onClick={onGenerateAll} disabled={generating}>
-            {generating ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Play className="w-4 h-4 mr-1.5" />}
-            {t('series.start_generate')}
-          </Button>
+        ))}
+      </div>
+      <div className="mt-3 grid grid-cols-3 gap-3">
+        <ScheduleStat label={t('university.weeks_label')} value={series.total_weeks} unit={t('series.week_label')} />
+        <ScheduleStat label={t('university.lessons_per_week')} value={series.lessons_per_week} unit={t('series.per_week')} />
+        <ScheduleStat label={t('university.total_lessons_prefix')} value={stats.totalExpected} unit={t('university.total_lessons_unit')} highlight />
+      </div>
+      {series.objectives && (
+        <div className="mt-4 pt-4 border-t border-gray-100">
+          <div className="text-sm text-gray-500 mb-1">{t('university.objectives_label')}</div>
+          <div className="text-sm text-gray-800 whitespace-pre-wrap">{series.objectives}</div>
         </div>
       )}
-
-      {lessons.length > 0 && (
-        <Card>
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium text-gray-600">{t('series.progress')}</span>
-            <span className="text-sm font-semibold text-brand-600">{completedCount}/{lessons.length}</span>
-          </div>
-          <div className="mt-2 w-full bg-gray-200 rounded-full h-2">
-            <div className="bg-brand-500 h-2 rounded-full transition-all"
-              style={{ width: `${lessons.length > 0 ? (completedCount / lessons.length) * 100 : 0}%` }} />
-          </div>
-        </Card>
+      {series.quality_goals && (
+        <div className="mt-3">
+          <div className="text-sm text-gray-500 mb-1">{t('university.quality_goals_label')}</div>
+          <div className="text-sm text-gray-800 whitespace-pre-wrap">{series.quality_goals}</div>
+        </div>
       )}
-    </div>
+      {series.special_requirements && (
+        <div className="mt-3">
+          <div className="text-sm text-gray-500 mb-1">{t('university.special_req_label')}</div>
+          <div className="text-sm text-gray-800 whitespace-pre-wrap">{series.special_requirements}</div>
+        </div>
+      )}
+    </Card>
   )
 }
 
-function LessonsTab({ series, lessons, navigate, t }: any) {
+// ───────────────────────────────────────────────────────────────────
+// LessonsTab
+// ───────────────────────────────────────────────────────────────────
+function LessonsTab({ series, lessons, navigate, forUserId, onRetryOne, onEditInDoc, t }: any) {
+  const qs = forUserId ? `?for_user_id=${encodeURIComponent(forUserId)}` : ''
   if (!series.syllabus?.lessons?.length) {
     return <Card><p className="text-sm text-gray-500">{t('university.no_syllabus_yet')}</p></Card>
   }
@@ -259,13 +395,13 @@ function LessonsTab({ series, lessons, navigate, t }: any) {
           lesson?.status === 'failed' ? t('series.status_failed') :
           lesson?.status === 'queued' ? t('series.status_queued') : t('series.status_pending')
         return (
-          <div key={idx} className="flex items-center gap-4 p-3 bg-white rounded-lg border border-gray-200 hover:border-gray-300 transition-colors">
+          <div key={idx} className="flex items-center gap-3 p-3 bg-white rounded-lg border border-gray-200 hover:border-gray-300 transition-colors">
             <span className="text-xs text-gray-400 w-16 flex-shrink-0">
               {t('series.week_lesson').replace('{w}', String(item.week)).replace('{l}', String(item.lesson_num))}
             </span>
             <div className="flex-1 min-w-0">
               {lesson ? (
-                <button onClick={() => navigate(`/lesson/${lesson.id}/process`)} className="text-sm font-medium text-gray-900 hover:text-brand-600 truncate block text-left">
+                <button onClick={() => navigate(`/lesson/${lesson.id}/process${qs}`)} className="text-sm font-medium text-gray-900 hover:text-brand-600 truncate block text-left">
                   {item.title}
                 </button>
               ) : (
@@ -280,6 +416,24 @@ function LessonsTab({ series, lessons, navigate, t }: any) {
               {lesson?.status === 'queued' && <Clock className="w-3 h-3" />}
               <span>{label}</span>
             </div>
+            {lesson?.status === 'completed' && (
+              <button
+                onClick={() => onEditInDoc(lesson.id)}
+                title={t('university.edit_in_doc')}
+                className="p-1.5 text-gray-400 hover:text-brand-600 transition-colors"
+              >
+                <FileEdit className="w-4 h-4" />
+              </button>
+            )}
+            {lesson?.status === 'failed' && (
+              <button
+                onClick={() => onRetryOne(lesson.id)}
+                title={t('university.retry_one')}
+                className="p-1.5 text-gray-400 hover:text-brand-600 transition-colors"
+              >
+                <RotateCcw className="w-4 h-4" />
+              </button>
+            )}
           </div>
         )
       })}
@@ -287,6 +441,9 @@ function LessonsTab({ series, lessons, navigate, t }: any) {
   )
 }
 
+// ───────────────────────────────────────────────────────────────────
+// ExercisesTab
+// ───────────────────────────────────────────────────────────────────
 function ExercisesTab({ lessons, series, seriesId, t }: any) {
   const completed = useMemo(() => lessons.filter((l: any) => l.status === 'completed'), [lessons])
   const [source, setSource] = useState<SourceRef | null>(null)
@@ -335,11 +492,9 @@ function ExercisesTab({ lessons, series, seriesId, t }: any) {
       if (d.status === 'queued') {
         setResult(null)
         try {
-          const { toast } = await import('../components/ui/Toast')
           const { useJobsStore } = await import('../stores/jobsStore')
           useJobsStore.getState().add({ result_id: rid, tool_type: mode as any, title: d.title || '' })
           toast.info(t('tools.job_enqueued'))
-          const { getSocket } = await import('../services/socket')
           const s = getSocket()
           const onDone = async (payload: any) => {
             if (payload?.result_id !== rid) return
@@ -464,6 +619,9 @@ function ExercisesTab({ lessons, series, seriesId, t }: any) {
   )
 }
 
+// ───────────────────────────────────────────────────────────────────
+// PPTTab
+// ───────────────────────────────────────────────────────────────────
 function PPTTab({ lessons, series, seriesId, t }: any) {
   const completed = useMemo(() => lessons.filter((l: any) => l.status === 'completed'), [lessons])
   const [source, setSource] = useState<SourceRef | null>(null)
@@ -498,86 +656,6 @@ function PPTTab({ lessons, series, seriesId, t }: any) {
         ) : (
           <p className="text-sm text-gray-500">{t('university.pick_lesson_hint')}</p>
         )}
-      </Card>
-    </div>
-  )
-}
-
-function ExportTab({ seriesId, t }: any) {
-  const [fmt, setFmt] = useState('docx')
-  const [withEx, setWithEx] = useState(false)
-  const [loading, setLoading] = useState<'merged' | 'zip' | ''>('')
-  const [err, setErr] = useState('')
-
-  const download = async (kind: 'merged' | 'zip') => {
-    setLoading(kind)
-    setErr('')
-    try {
-      const url = `/api/v1/series/${seriesId}/export-${kind}?format=${fmt}&include_exercises=${withEx}`
-      const res = await api.get(url, { responseType: 'blob' })
-      const blob = URL.createObjectURL(res.data)
-      const disp = res.headers['content-disposition'] || ''
-      const match = disp.match(/filename\*?=(?:UTF-8'')?([^;\s]+)/i)
-      const fname = match ? decodeURIComponent(match[1].replace(/"/g, '')) :
-        kind === 'zip' ? `series-${seriesId}.zip` : `series-${seriesId}.${fmt}`
-      const a = document.createElement('a')
-      a.href = blob
-      a.download = fname
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(blob)
-    } catch (e: any) {
-      setErr(e.response?.data?.detail || t('university.export_failed'))
-    } finally {
-      setLoading('')
-    }
-  }
-
-  return (
-    <div className="space-y-4">
-      <Card>
-        <h2 className="font-semibold text-gray-900 mb-3">{t('university.export_title')}</h2>
-        <p className="text-xs text-gray-500 mb-4">{t('university.export_hint')}</p>
-
-        {err && <div className="mb-3 p-2 bg-red-50 border border-red-200 rounded text-sm text-red-600">{err}</div>}
-
-        <div className="grid grid-cols-2 gap-4 mb-4">
-          <div>
-            <label className="block text-sm text-gray-700 mb-1">{t('university.export_format')}</label>
-            <select value={fmt} onChange={(e) => setFmt(e.target.value)}
-              className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm">
-              <option value="docx">DOCX</option>
-              <option value="pdf">PDF</option>
-              <option value="md">Markdown</option>
-              <option value="txt">TXT</option>
-              <option value="json">JSON</option>
-            </select>
-          </div>
-          <label className="flex items-center gap-2 text-sm text-gray-700 mt-6">
-            <input type="checkbox" checked={withEx} onChange={(e) => setWithEx(e.target.checked)} />
-            {t('university.export_include_exercises')}
-          </label>
-        </div>
-
-        <div className="grid grid-cols-2 gap-3">
-          <button onClick={() => download('merged')} disabled={loading === 'merged'}
-            className="p-4 rounded-xl border-2 border-gray-200 hover:border-brand-400 hover:bg-brand-50 transition-all text-left">
-            <div className="flex items-center gap-2 mb-1">
-              {loading === 'merged' ? <Loader2 className="w-4 h-4 animate-spin text-brand-600" /> : <FileDown className="w-4 h-4 text-brand-600" />}
-              <span className="font-medium text-gray-900">{t('university.export_merged')}</span>
-            </div>
-            <p className="text-xs text-gray-500">{t('university.export_merged_desc')}</p>
-          </button>
-          <button onClick={() => download('zip')} disabled={loading === 'zip'}
-            className="p-4 rounded-xl border-2 border-gray-200 hover:border-brand-400 hover:bg-brand-50 transition-all text-left">
-            <div className="flex items-center gap-2 mb-1">
-              {loading === 'zip' ? <Loader2 className="w-4 h-4 animate-spin text-brand-600" /> : <Package className="w-4 h-4 text-brand-600" />}
-              <span className="font-medium text-gray-900">{t('university.export_zip')}</span>
-            </div>
-            <p className="text-xs text-gray-500">{t('university.export_zip_desc')}</p>
-          </button>
-        </div>
       </Card>
     </div>
   )

@@ -64,6 +64,9 @@ class LessonListResponse(BaseModel):
     progress: int
     teaching_model_id: Optional[str] = None
     created_at: Optional[datetime] = None
+    mode: Optional[str] = None
+    has_full_optimized: bool = False
+    has_stages: bool = False
 
     class Config:
         from_attributes = True

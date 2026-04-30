@@ -15,11 +15,32 @@ import CourseToolsLibrary from './pages/CourseToolsLibrary'
 import UniversityCreate from './pages/UniversityCreate'
 import UniversityDashboard from './pages/UniversityDashboard'
 import TemplateFill from './pages/TemplateFill'
+import DocumentsLibrary from './pages/DocumentsLibrary'
+import DocumentEditor from './pages/DocumentEditor'
+import { parseAccessLevel, isLimited, isAdmin } from './lib/access'
+import AdminUsers from './pages/AdminUsers'
+import AdminUserStorage from './pages/AdminUserStorage'
 import { Toaster } from './components/ui/Toast'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const token = useAuthStore((s) => s.token)
   if (!token) return <Navigate to="/login" replace />
+  return <>{children}</>
+}
+
+function LimitedRoute({ children }: { children: React.ReactNode }) {
+  const user = useAuthStore((s) => s.user)
+  if (isLimited(parseAccessLevel(user?.access_level))) {
+    return <Navigate to="/dashboard" replace />
+  }
+  return <>{children}</>
+}
+
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const user = useAuthStore((s) => s.user)
+  if (!isAdmin(parseAccessLevel(user?.access_level))) {
+    return <Navigate to="/dashboard" replace />
+  }
   return <>{children}</>
 }
 
@@ -91,7 +112,9 @@ export default function App() {
         path="/course-tools/library"
         element={
           <ProtectedRoute>
-            <CourseToolsLibrary />
+            <LimitedRoute>
+              <CourseToolsLibrary />
+            </LimitedRoute>
           </ProtectedRoute>
         }
       />
@@ -99,7 +122,9 @@ export default function App() {
         path="/course-tools/:lessonId?"
         element={
           <ProtectedRoute>
-            <CourseTools />
+            <LimitedRoute>
+              <CourseTools />
+            </LimitedRoute>
           </ProtectedRoute>
         }
       />
@@ -123,7 +148,45 @@ export default function App() {
         path="/template-fill"
         element={
           <ProtectedRoute>
-            <TemplateFill />
+            <LimitedRoute>
+              <TemplateFill />
+            </LimitedRoute>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/admin/users/:userId/storage"
+        element={
+          <ProtectedRoute>
+            <AdminRoute>
+              <AdminUserStorage />
+            </AdminRoute>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/admin/users"
+        element={
+          <ProtectedRoute>
+            <AdminRoute>
+              <AdminUsers />
+            </AdminRoute>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/documents"
+        element={
+          <ProtectedRoute>
+            <DocumentsLibrary />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/documents/version/:versionId"
+        element={
+          <ProtectedRoute>
+            <DocumentEditor />
           </ProtectedRoute>
         }
       />

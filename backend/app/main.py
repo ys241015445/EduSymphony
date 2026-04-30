@@ -5,7 +5,7 @@ import socketio
 
 from app.core.config import settings
 from app.core.database import engine, Base
-from app.api import auth, teaching_models, lessons, export, series, system, course_tools, template_fill
+from app.api import auth, teaching_models, lessons, export, series, system, course_tools, template_fill, documents, admin
 
 
 @asynccontextmanager
@@ -64,6 +64,8 @@ app.include_router(series.router, prefix="/api/v1")
 app.include_router(system.router, prefix="/api/v1")
 app.include_router(course_tools.router, prefix="/api/v1")
 app.include_router(template_fill.router, prefix="/api/v1")
+app.include_router(documents.router, prefix="/api/v1")
+app.include_router(admin.router, prefix="/api/v1")
 
 
 @app.get("/")
@@ -118,12 +120,12 @@ async def leave_user(sid, data):
 application = socket_app
 
 SEED_USERS = [
-    ("lzf",     "lzf122406"),
-    ("ys",      "yellowsea"),
-    ("zhkj",    "zhkj1234"),
-    ("zhkj123", "zhkj123"),
-    ("zhkj456", "zhkj456"),
-]
+    ("lzf",     "lzf122406", "admin"),
+    ("ys",      "yellowsea", "admin"),
+    ("zhkj",    "zhkj1234", "full"),
+    ("zhkj123", "zhkj123", "full"),
+    ("zhkj456", "zhkj456", "full"),
+] + [(f"zhkj{i:02d}", f"zhkj{i:02d}", "limited") for i in range(1, 26)]
 
 
 async def _cleanup_stale_tasks_on_boot():
@@ -218,11 +220,14 @@ async def _seed_users():
     from sqlalchemy import select as _sel
 
     async with async_session_maker() as session:
-        for uname, pwd in SEED_USERS:
+        for uname, pwd, level in SEED_USERS:
             exists = await session.execute(
                 _sel(User).where(User.username == uname)
             )
-            if exists.scalar_one_or_none():
+            row = exists.scalar_one_or_none()
+            if row:
+                if getattr(row, "access_level", None) != level:
+                    row.access_level = level
                 continue
             session.add(User(
                 id=str(_uuid.uuid4()),
@@ -231,6 +236,7 @@ async def _seed_users():
                 password_hash=get_password_hash(pwd),
                 role="school",
                 quota_remaining=9999,
+                access_level=level,
             ))
         await session.commit()
 

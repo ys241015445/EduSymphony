@@ -7,7 +7,7 @@ import traceback
 from typing import Optional
 from io import BytesIO
 
-from fastapi import APIRouter, Depends, HTTPException, Form
+from fastapi import APIRouter, Depends, HTTPException, Form, Query
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -16,12 +16,12 @@ from loguru import logger
 
 from app.core.database import get_db, async_session_maker
 from app.core.config import settings
-from app.core.deps import get_current_active_user
+from app.core.deps import get_current_active_user, require_not_limited, resolve_documents_owner
 from app.models.user import User
 from app.models.lesson import LessonPlan, LessonSeries
 from app.models.course_tool import CourseToolResult
 
-router = APIRouter(prefix="/course-tools", tags=["课程工具"])
+router = APIRouter(prefix="/course-tools", tags=["课程工具"], dependencies=[Depends(require_not_limited)])
 
 DOUBAO_PROVIDER = "doubao"
 ALLOWED_PROVIDERS = {"doubao", "qwen", "deepseek", "kimi", "spark", "openai"}
@@ -127,14 +127,14 @@ def _syllabus_to_text(series: LessonSeries) -> str:
 
 
 async def _fetch_tool_result(
-    db: AsyncSession, current_user: User, result_id: str, expected_type: Optional[str] = None,
+    db: AsyncSession, subject_user: User, result_id: str, expected_type: Optional[str] = None,
 ) -> CourseToolResult:
     """Fetch a CourseToolResult row with ownership + optional type check."""
     res = await db.execute(select(CourseToolResult).where(CourseToolResult.id == result_id))
     ci = res.scalar_one_or_none()
     if not ci:
         raise HTTPException(404, "所选记录不存在")
-    if ci.user_id != current_user.id:
+    if ci.user_id != subject_user.id:
         raise HTTPException(403, "无权访问所选记录")
     if expected_type and ci.tool_type != expected_type:
         raise HTTPException(400, f"记录类型不符，期望 {expected_type}，实际 {ci.tool_type}")
@@ -1040,10 +1040,12 @@ async def generate_outline(
 @router.get("/outline/{result_id}/download")
 async def download_outline(
     result_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：下载指定用户的记录"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    item = await _get_result(result_id, current_user.id, db)
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    item = await _get_result(result_id, owner.id, db)
     data = item.result or {}
 
     from docx import Document
@@ -1519,10 +1521,12 @@ async def generate_ppt(
 @router.get("/ppt/{result_id}/download")
 async def download_ppt(
     result_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：下载指定用户的记录"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    item = await _get_result(result_id, current_user.id, db)
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    item = await _get_result(result_id, owner.id, db)
     if not item.file_path or not os.path.isfile(item.file_path):
         raise HTTPException(404, "PPT文件不存在")
     with open(item.file_path, "rb") as f:
@@ -1603,10 +1607,12 @@ async def generate_exercises(
 async def download_exercises(
     result_id: str,
     version: str = "student",
+    for_user_id: Optional[str] = Query(None, description="管理员：下载指定用户的记录"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    item = await _get_result(result_id, current_user.id, db)
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    item = await _get_result(result_id, owner.id, db)
     data = item.result or {}
 
     from docx import Document
@@ -1706,11 +1712,13 @@ async def generate_practice(
 async def merge_practice_to_ppt(
     practice_id: str,
     ppt_id: str = Form(...),
+    for_user_id: Optional[str] = Query(None, description="管理员：以指定用户身份合并并保存结果"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    practice = await _get_result(practice_id, current_user.id, db)
-    ppt_item = await _get_result(ppt_id, current_user.id, db)
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    practice = await _get_result(practice_id, owner.id, db)
+    ppt_item = await _get_result(ppt_id, owner.id, db)
 
     if not ppt_item.file_path or not os.path.isfile(ppt_item.file_path):
         raise HTTPException(404, "原始PPT文件不存在")
@@ -1757,7 +1765,7 @@ async def merge_practice_to_ppt(
         f.write(merged_bytes)
 
     merged_result = {**(ppt_item.result or {}), "merged_practice": True}
-    item = await _save(db, current_user.id, ppt_item.lesson_id, "ppt",
+    item = await _save(db, owner.id, ppt_item.lesson_id, "ppt",
                        {**ppt_params, "merged_practice_id": practice_id},
                        merged_result, fpath)
     return {"id": item.id, "message": "合并成功"}
@@ -1766,10 +1774,12 @@ async def merge_practice_to_ppt(
 @router.get("/practice/{result_id}/download")
 async def download_practice(
     result_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：下载指定用户的记录"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    item = await _get_result(result_id, current_user.id, db)
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    item = await _get_result(result_id, owner.id, db)
     data = item.result or {}
 
     from docx import Document
@@ -1837,12 +1847,14 @@ async def list_history(
     lesson_id: Optional[str] = None,
     tool_type: Optional[str] = None,
     status: Optional[str] = None,
+    for_user_id: Optional[str] = Query(None, description="管理员：查看指定用户的课程工具记录"),
     limit: int = 200,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     safe_limit = max(1, min(limit, 500))
-    q = select(CourseToolResult).where(CourseToolResult.user_id == current_user.id)
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    q = select(CourseToolResult).where(CourseToolResult.user_id == owner.id)
     if lesson_id:
         q = q.where(CourseToolResult.lesson_id == lesson_id)
     if tool_type:
@@ -1858,20 +1870,24 @@ async def list_history(
 @router.get("/results/{result_id}")
 async def get_result(
     result_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：读取指定用户的记录"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    item = await _get_result(result_id, current_user.id, db)
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    item = await _get_result(result_id, owner.id, db)
     return _serialize_result(item, include_result=True)
 
 
 @router.delete("/results/{result_id}")
 async def delete_result(
     result_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：删除指定用户的记录"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    item = await _get_result(result_id, current_user.id, db)
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    item = await _get_result(result_id, owner.id, db)
     # try to remove the backing file (best-effort)
     fp = item.file_path
     if fp and os.path.isfile(fp):

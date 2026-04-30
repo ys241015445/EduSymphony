@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import Header from '../components/layout/Header'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
@@ -64,6 +64,9 @@ const FORMAT_MATRIX: Record<string, Format[]> = {
 
 export default function TemplateFill() {
   const t = useT()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const forUserId = searchParams.get('for_user_id') || ''
+  const scopeParams = forUserId ? { for_user_id: forUserId } : undefined
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // step 1: file
@@ -92,11 +95,17 @@ export default function TemplateFill() {
 
   useEffect(() => {
     loadHistory()
-  }, [])
+  }, [forUserId])
+
+  const clearScopeFilter = () => {
+    const p = new URLSearchParams(searchParams)
+    p.delete('for_user_id')
+    setSearchParams(p, { replace: true })
+  }
 
   const loadHistory = async () => {
     try {
-      const res = await api.get('/api/v1/template-fill/history')
+      const res = await api.get('/api/v1/template-fill/history', { params: scopeParams })
       setHistory(res.data || [])
     } catch {
       // ignore
@@ -205,7 +214,7 @@ export default function TemplateFill() {
     setError('')
     try {
       const res = await api.get(`/api/v1/template-fill/${id}/download`, {
-        params: { format },
+        params: { format, ...(scopeParams || {}) },
         responseType: 'blob',
       })
       const disp = String(res.headers['content-disposition'] || '')
@@ -262,6 +271,20 @@ export default function TemplateFill() {
           </h1>
           <p className="text-sm text-gray-500 mt-1">{t('template.desc')}</p>
         </div>
+
+        {forUserId ? (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-950">
+            <span>{t('admin.docs_scope_hint').replace('{id}', forUserId)}</span>
+            <button
+              type="button"
+              onClick={clearScopeFilter}
+              className="inline-flex items-center gap-1 text-amber-800 hover:text-amber-950 font-medium"
+            >
+              <X className="w-4 h-4" />
+              {t('admin.clear_scope')}
+            </button>
+          </div>
+        ) : null}
 
         {/* Banners */}
         {error && (

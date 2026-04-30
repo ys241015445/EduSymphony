@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.deps import get_current_active_user
+from app.core.deps import get_current_active_user, require_not_limited, resolve_documents_owner
 from app.models.course_tool import CourseToolResult
 from app.models.user import User
 from app.services.template_fill_service import (
@@ -37,7 +37,7 @@ from app.services.template_fill_service import (
     fill as tf_fill,
 )
 
-router = APIRouter(prefix="/template-fill", tags=["模板AI填写"])
+router = APIRouter(prefix="/template-fill", tags=["模板AI填写"], dependencies=[Depends(require_not_limited)])
 
 TOOL_TYPE = "template_fill"
 
@@ -374,10 +374,12 @@ async def generate_endpoint(
 async def download_endpoint(
     result_id: str,
     format: str = Query("", description="目标格式，缺省使用原格式"),
+    for_user_id: Optional[str] = Query(None, description="管理员：下载指定用户的记录"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    item = await _get_result(result_id, current_user.id, db)
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    item = await _get_result(result_id, owner.id, db)
     if not item.file_path or not os.path.isfile(item.file_path):
         raise HTTPException(404, "文件已丢失")
 
@@ -412,13 +414,15 @@ async def download_endpoint(
 @router.get("/history")
 async def history_endpoint(
     limit: int = Query(30, ge=1, le=100),
+    for_user_id: Optional[str] = Query(None, description="管理员：查看指定用户的历史"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
     q = (
         select(CourseToolResult)
         .where(
-            CourseToolResult.user_id == current_user.id,
+            CourseToolResult.user_id == owner.id,
             CourseToolResult.tool_type == TOOL_TYPE,
         )
         .order_by(CourseToolResult.created_at.desc())

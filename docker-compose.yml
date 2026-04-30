@@ -1,6 +1,13 @@
 # EduSymphony 本地/开发双容器部署
 # 生产环境请使用 docker-compose.coolify.yml（单容器 + Nginx）
 # 注：Compose v2 已废弃顶层 `version` 字段，此处不再声明
+#
+# Use Docker Compose V2: `docker compose` (not legacy `docker-compose` binary).
+# Single-container image build (root Dockerfile) uses Dockerfile heredocs — requires BuildKit
+# (enabled by default on Docker Desktop; Linux: DOCKER_BUILDKIT=1).
+#
+# Secrets: copy `.env.example` at repo root to `.env` and fill DATABASE_URL / API keys.
+# Never commit `.env` or paste production passwords into docs or source defaults.
 
 services:
   backend:

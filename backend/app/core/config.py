@@ -11,13 +11,16 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     APP_DEBUG: bool = True
 
-    DATABASE_URL: str = "postgresql+asyncpg://postgres:lzf04193290!@db.sadalarrjljxqmfwhrlu.supabase.co:5432/postgres"
+    # Non-production placeholders; override via backend/.env or process environment.
+    DATABASE_URL: str = (
+        "postgresql+asyncpg://postgres:your_password_here@127.0.0.1:5432/postgres"
+    )
 
-    SUPABASE_URL: str = "https://sadalarrjljxqmfwhrlu.supabase.co/rest/v1/"
+    SUPABASE_URL: str = "https://your-project-ref.supabase.co/rest/v1/"
     SUPABASE_ANON_KEY: str = ""
     SUPABASE_SERVICE_ROLE_KEY: str = ""
 
-    JWT_SECRET: str = "change-me-in-production-edusymphony-2026"
+    JWT_SECRET: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 1440
 

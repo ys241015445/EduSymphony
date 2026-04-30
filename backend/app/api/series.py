@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import Optional, List
@@ -10,7 +10,7 @@ import aiofiles
 from loguru import logger
 
 from app.core.config import settings
-from app.core.deps import get_db, get_current_active_user
+from app.core.deps import get_db, get_current_active_user, resolve_documents_owner
 from app.models.user import User
 from app.models.lesson import LessonSeries, LessonPlan, LessonStatus
 
@@ -102,7 +102,7 @@ async def create_series(
 
     series = LessonSeries(
         id=str(uuid.uuid4()),
-        user_id=current_user.id,
+        user_id=owner.id,
         title=title,
         subject=subject,
         grade_level=grade_level,
@@ -128,19 +128,21 @@ async def create_series(
     await db.refresh(series)
 
     from app.tasks.queue_manager import enqueue
-    await enqueue(series.id, user_id=str(current_user.id), kind="syllabus")
+    await enqueue(series.id, user_id=str(owner.id), kind="syllabus")
 
     return SeriesResponse.model_validate(series)
 
 
 @router.get("", response_model=List[SeriesListResponse])
 async def list_series(
+    for_user_id: Optional[str] = Query(None, description="管理员：列出指定用户的系列"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
     result = await db.execute(
         select(LessonSeries)
-        .where(LessonSeries.user_id == current_user.id)
+        .where(LessonSeries.user_id == owner.id)
         .order_by(LessonSeries.created_at.desc())
     )
     return [SeriesListResponse.model_validate(s) for s in result.scalars().all()]
@@ -149,11 +151,13 @@ async def list_series(
 @router.get("/{series_id}", response_model=SeriesResponse)
 async def get_series(
     series_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：读取指定用户的系列"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
     result = await db.execute(
-        select(LessonSeries).where(LessonSeries.id == series_id, LessonSeries.user_id == current_user.id)
+        select(LessonSeries).where(LessonSeries.id == series_id, LessonSeries.user_id == owner.id)
     )
     series = result.scalar_one_or_none()
     if not series:
@@ -164,12 +168,14 @@ async def get_series(
 @router.get("/{series_id}/lessons")
 async def get_series_lessons(
     series_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：列出指定用户在该系列下的教案"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
     result = await db.execute(
         select(LessonPlan)
-        .where(LessonPlan.sequence_id == series_id, LessonPlan.user_id == current_user.id)
+        .where(LessonPlan.sequence_id == series_id, LessonPlan.user_id == owner.id)
         .order_by(LessonPlan.sequence_order)
     )
     lessons = result.scalars().all()
@@ -185,11 +191,13 @@ async def get_series_lessons(
 @router.post("/{series_id}/generate-all")
 async def generate_all_lessons(
     series_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：以指定用户身份批量生成系列课时并扣其配额"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
     result = await db.execute(
-        select(LessonSeries).where(LessonSeries.id == series_id, LessonSeries.user_id == current_user.id)
+        select(LessonSeries).where(LessonSeries.id == series_id, LessonSeries.user_id == owner.id)
     )
     series = result.scalar_one_or_none()
     if not series:
@@ -202,13 +210,24 @@ async def generate_all_lessons(
 
     from app.tasks.queue_manager import enqueue
 
+    n_new = len(lessons_data)
+    if n_new <= 0:
+        raise HTTPException(status_code=400, detail="大纲中无课时")
+    if owner.quota_remaining < n_new:
+        detail = (
+            f"目标用户配额不足（需要 {n_new}，剩余 {owner.quota_remaining}）"
+            if for_user_id and str(for_user_id).strip() and str(for_user_id).strip() != current_user.id
+            else f"配额不足（需要 {n_new}，剩余 {owner.quota_remaining}）"
+        )
+        raise HTTPException(status_code=403, detail=detail)
+
     created_ids = []
     prev_lesson_id = None
 
     for i, item in enumerate(lessons_data):
         lesson = LessonPlan(
             id=str(uuid.uuid4()),
-            user_id=current_user.id,
+            user_id=owner.id,
             title=item.get("title", f"第{i+1}课"),
             subject=series.subject,
             grade_level=series.grade_level,
@@ -230,12 +249,11 @@ async def generate_all_lessons(
         created_ids.append(lesson.id)
         prev_lesson_id = lesson.id
 
-    if current_user.quota_remaining >= len(created_ids):
-        current_user.quota_remaining -= len(created_ids)
+    owner.quota_remaining -= len(created_ids)
     await db.commit()
 
     for lid in created_ids:
-        await enqueue(lid, user_id=str(current_user.id), kind="lesson_series")
+        await enqueue(lid, user_id=str(owner.id), kind="lesson_series")
 
     series.status = "generating"
     await db.commit()

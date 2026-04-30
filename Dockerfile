@@ -1,6 +1,10 @@
+# syntax=docker/dockerfile:1.4
 # ============================================
 # EduSymphony Dockerfile (ai_tool_0320)
 # Vite + FastAPI + Nginx | 阿里云镜像 | Coolify
+# Requires Docker BuildKit (heredoc COPY <<'EOF'). Docker Desktop enables it by default;
+# Linux: DOCKER_BUILDKIT=1 docker compose build ...
+# Secrets: inject at runtime (Coolify / compose env_file), never COPY .env into the image
 # ============================================
 
 # ---------- 阶段1: 构建前端 (Vite) ----------

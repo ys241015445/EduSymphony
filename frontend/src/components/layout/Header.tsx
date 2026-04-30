@@ -5,7 +5,8 @@ import { useLanguageStore, Locale } from '../../stores/languageStore'
 import { useT } from '../../i18n/translations'
 import Button from '../ui/Button'
 import JobsBadge from './JobsBadge'
-import { BookOpen, LogOut, LayoutDashboard, Globe } from 'lucide-react'
+import { canUseCourseTools, parseAccessLevel, isAdmin } from '../../lib/access'
+import { BookOpen, LogOut, LayoutDashboard, Globe, Files, Shield } from 'lucide-react'
 
 const LOCALE_OPTIONS: { value: Locale; key: string }[] = [
   { value: 'zh-CN', key: 'nav.lang_zh_cn' },
@@ -35,6 +36,9 @@ export default function Header() {
     navigate('/')
   }
 
+  const access = parseAccessLevel(user?.access_level)
+  const showToolsJobs = user ? canUseCourseTools(access) : false
+  const showAdmin = user ? isAdmin(access) : false
   const currentLabel = LOCALE_OPTIONS.find((o) => o.value === locale)
 
   return (
@@ -76,13 +80,27 @@ export default function Header() {
 
           {token && user ? (
             <>
-              <JobsBadge />
+              {showToolsJobs && <JobsBadge />}
               <Link to="/dashboard">
                 <Button variant="ghost" size="sm">
                   <LayoutDashboard className="w-4 h-4 mr-1.5" />
                   {t('nav.workspace')}
                 </Button>
               </Link>
+              <Link to="/documents">
+                <Button variant="ghost" size="sm">
+                  <Files className="w-4 h-4 mr-1.5" />
+                  {t('dashboard.documents')}
+                </Button>
+              </Link>
+              {showAdmin && (
+                <Link to="/admin/users">
+                  <Button variant="ghost" size="sm">
+                    <Shield className="w-4 h-4 mr-1.5" />
+                    {t('nav.admin_users')}
+                  </Button>
+                </Link>
+              )}
               <span className="text-sm text-gray-500">{user.username}</span>
               <Button variant="ghost" size="sm" onClick={handleLogout}>
                 <LogOut className="w-4 h-4 mr-1.5" />

@@ -2,6 +2,8 @@
 # EduSymphony - Frontend (Vite + Nginx)
 # 仅用于 docker-compose.yml 双容器开发部署
 # 生产单容器请用根目录的 Dockerfile（已内置前端构建）
+# Base images: node:20-alpine, nginx:1.27-alpine — Docker Engine 24+ / Compose V2 recommended.
+# Backend credentials: compose env_file only; never bake into images
 # ============================================
 
 # ---------- 阶段 1: Vite 构建 ----------

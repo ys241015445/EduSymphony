@@ -7,10 +7,12 @@ import { useT } from '../../i18n/translations'
 interface Props {
   lessonId: string
   sectionKey: string
+  /** Admin scoped lesson: target user's id */
+  forUserId?: string
   onSubmitted?: () => void
 }
 
-export default function AnnotationEditor({ lessonId, sectionKey, onSubmitted }: Props) {
+export default function AnnotationEditor({ lessonId, sectionKey, forUserId, onSubmitted }: Props) {
   const t = useT()
   const [open, setOpen] = useState(false)
   const [content, setContent] = useState('')
@@ -25,6 +27,8 @@ export default function AnnotationEditor({ lessonId, sectionKey, onSubmitted }: 
         section_key: sectionKey,
         content,
         request_regenerate: requestRegenerate,
+      }, {
+        params: forUserId ? { for_user_id: forUserId } : undefined,
       })
       setContent('')
       setRequestRegenerate(false)
