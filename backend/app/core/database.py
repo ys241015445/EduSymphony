@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 from uuid import uuid4
 from loguru import logger
-from sqlalchemy import event, exc as sa_exc
+from sqlalchemy import event, exc as sa_exc, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from app.core.config import settings
@@ -43,9 +43,21 @@ IS_POOLED = ":6543" in settings.DATABASE_URL or "pooler." in settings.DATABASE_U
 #   - 每个 worker 认领 + 运行 handler 过程中可能同时持有 2 个 session
 #   - API 侧预留至少 5 个空闲连接处理交互请求
 #   - 可通过 DB_POOL_SIZE 显式覆盖
-_MAX_CONCURRENT_TASKS = _env_int("MAX_CONCURRENT_TASKS", 5, 1, 64)
+_MAX_CONCURRENT_TASKS = _env_int("MAX_CONCURRENT_TASKS", 10, 1, 64)
 _DEFAULT_POOL = max(15 if IS_POOLED else 10, _MAX_CONCURRENT_TASKS * 2 + 5)
 _DEFAULT_OVERFLOW = max(20 if IS_POOLED else 10, _MAX_CONCURRENT_TASKS * 2)
+# Supabase Transaction Pooler (Free tier): lower default worker count to reduce claim polling.
+if IS_POOLED and os.getenv("MAX_CONCURRENT_TASKS") is None:
+    _MAX_CONCURRENT_TASKS = min(_MAX_CONCURRENT_TASKS, 4)
+    _DEFAULT_POOL = max(8, _MAX_CONCURRENT_TASKS * 2 + 5)
+    _DEFAULT_OVERFLOW = max(4, _MAX_CONCURRENT_TASKS * 2)
+# Supabase Free / Transaction Pooler: cap implicit pool unless DB_POOL_SIZE is set explicitly.
+if IS_POOLED and os.getenv("DB_POOL_SIZE") is None:
+    _DEFAULT_POOL = min(_DEFAULT_POOL, 10)
+    _DEFAULT_OVERFLOW = min(_DEFAULT_OVERFLOW, 4)
+elif settings.APP_ENV == "production" and os.getenv("DB_POOL_SIZE") is None:
+    _DEFAULT_POOL = min(_DEFAULT_POOL, 10)
+    _DEFAULT_OVERFLOW = min(_DEFAULT_OVERFLOW, 4)
 
 DB_POOL_SIZE = _env_int("DB_POOL_SIZE", _DEFAULT_POOL, 1, 200)
 DB_MAX_OVERFLOW = _env_int("DB_MAX_OVERFLOW", _DEFAULT_OVERFLOW, 0, 200)
@@ -193,6 +205,39 @@ async def close_db():
             logger.warning(f"[db] swallow dispose-time disconnect: {e!s:.160}")
         else:
             raise
+
+
+async def check_db_connection() -> bool:
+    """Lightweight SELECT 1 for /health and frontend preflight."""
+    try:
+        async with async_session_maker() as session:
+            await session.execute(text("SELECT 1"))
+        return True
+    except Exception as e:
+        logger.warning(f"[db] check_db_connection failed: {e!s:.160}")
+        return False
+
+
+async def ensure_queue_target_id_width() -> None:
+    """Ensure queue_jobs.target_id fits zhuke `{uuid}::{idx}` composite keys."""
+    try:
+        async with async_session_maker() as session:
+            await session.execute(
+                text(
+                    """
+                    ALTER TABLE queue_jobs
+                    ALTER COLUMN target_id TYPE VARCHAR(128)
+                    """
+                )
+            )
+            await session.commit()
+            logger.info("[db] queue_jobs.target_id widened to VARCHAR(128)")
+    except Exception as e:
+        msg = str(e).lower()
+        if "does not exist" in msg and "queue_jobs" in msg:
+            logger.debug("[db] queue_jobs missing; skip target_id widen")
+            return
+        logger.warning(f"[db] ensure_queue_target_id_width: {e!s:.160}")
 
 
 def db_pool_status() -> dict:

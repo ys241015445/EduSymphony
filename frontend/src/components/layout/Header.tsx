@@ -15,8 +15,11 @@ const LOCALE_OPTIONS: { value: Locale; key: string }[] = [
 ]
 
 export default function Header() {
-  const { user, token, logout } = useAuthStore()
-  const { locale, setLocale } = useLanguageStore()
+  const user = useAuthStore((s) => s.user)
+  const token = useAuthStore((s) => s.token)
+  const logout = useAuthStore((s) => s.logout)
+  const locale = useLanguageStore((s) => s.locale)
+  const setLocale = useLanguageStore((s) => s.setLocale)
   const navigate = useNavigate()
   const t = useT()
 
@@ -100,6 +103,11 @@ export default function Header() {
                     {t('nav.admin_users')}
                   </Button>
                 </Link>
+              )}
+              {access !== 'admin' && !user.export_pay_exempt && (
+                <span className="text-xs px-2 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+                  {t('header.export_credits')}: {user.export_credits ?? 0}
+                </span>
               )}
               <span className="text-sm text-gray-500">{user.username}</span>
               <Button variant="ghost" size="sm" onClick={handleLogout}>

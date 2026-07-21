@@ -14,6 +14,7 @@ export interface DocumentSummary {
   lesson_status?: string | null
   lesson_mode?: string | null
   series_id?: string | null
+  deleted_at?: string | null
 }
 
 export interface DocumentVersionBrief {
@@ -49,12 +50,18 @@ export interface ExportRecordItem {
   job_id?: string | null
   status?: string | null
   error_message?: string | null
+  // JSON blob with kind-specific context. For source_kind='zhuke_generation'
+  // it carries `{ result_id, course_name, lessons_count, failures_count, ... }`
+  // — the UI uses `result_id` (or job_id as a fallback) to call the
+  // /semester-helper/zhuke/{rid}/download endpoint instead of the generic one.
+  params?: Record<string, any> | null
   expires_at?: string | null
   created_at?: string | null
+  deleted_at?: string | null
   is_available: boolean
 }
 
-export type DocumentsScope = { for_user_id?: string }
+export type DocumentsScope = { for_user_id?: string; include_deleted?: boolean }
 
 interface DocumentsState {
   library: DocumentSummary[]
@@ -65,7 +72,7 @@ interface DocumentsState {
   loadingVer: boolean
   loadingExports: boolean
 
-  fetchLibrary: (params?: { series_id?: string; include_virtual?: boolean; for_user_id?: string }) => Promise<void>
+  fetchLibrary: (params?: { series_id?: string; include_virtual?: boolean; for_user_id?: string; include_deleted?: boolean }) => Promise<void>
   ensureVersion: (lessonId: string, sourceKind?: string, scope?: DocumentsScope) => Promise<{ version_id: string; title: string; source_kind: string; is_new: boolean }>
   fetchVersionsForLesson: (lessonId: string, sourceKind?: string, scope?: DocumentsScope) => Promise<void>
   fetchVersion: (versionId: string) => Promise<DocumentVersionFull>
@@ -107,6 +114,7 @@ export const useDocumentsStore = create<DocumentsState>()((set) => ({
           ...(params?.series_id ? { series_id: params.series_id } : {}),
           ...(params?.include_virtual !== undefined ? { include_virtual: params.include_virtual } : {}),
           ...(params?.for_user_id ? { for_user_id: params.for_user_id } : {}),
+          ...(params?.include_deleted ? { include_deleted: true } : {}),
         },
       })
       set({ library: res.data })
@@ -176,6 +184,7 @@ export const useDocumentsStore = create<DocumentsState>()((set) => ({
         params: {
           limit: 200,
           ...(scope?.for_user_id ? { for_user_id: scope.for_user_id } : {}),
+          ...(scope?.include_deleted ? { include_deleted: true } : {}),
         },
       })
       set({ exports: res.data })

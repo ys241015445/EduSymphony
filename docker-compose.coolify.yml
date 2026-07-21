@@ -3,6 +3,15 @@
 # 数据库用外部 Supabase PostgreSQL，本容器只需文件存储卷
 # 注：Compose v2 已废弃顶层 `version` 字段，此处不再声明
 #
+# ┌──────────────────────────────────────────────────────────────────┐
+# │ 一键部署（公网 Linux / VPS）：                                       │
+# │   bash deploy.sh                                                   │
+# │ 或手动等价命令：                                                    │
+# │   docker compose -f docker-compose.coolify.yml up -d --build       │
+# │ Coolify：推代码后在面板 redeploy 即可（本文件即 compose 源）。       │
+# │ 本机 Windows 一键：powershell -ExecutionPolicy Bypass -File .\deploy.ps1 │
+# └──────────────────────────────────────────────────────────────────┘
+#
 # Use Docker Compose V2: `docker compose -f docker-compose.coolify.yml ...`
 # Root Dockerfile uses heredoc COPY — requires BuildKit (DOCKER_BUILDKIT=1 if needed).
 #
@@ -18,6 +27,14 @@ services:
     env_file:
       - .env
     environment:
+      # ── 视觉/多模态模型（立体几何「上传题目图片解题」入口）──
+      # 走 DashScope 兼容通道，复用 QWEN_API_KEY / QWEN_BASE_URL；.env 未配则用默认
+      QWEN_VL_MODEL:             ${QWEN_VL_MODEL:-qwen-vl-max}
+      # 文生图模型（英语卡片/知识漫画配图，走豆包方舟）。留空=关闭配图（纯文字）
+      DOUBAO_IMAGE_MODEL:        ${DOUBAO_IMAGE_MODEL:-}
+      # V免签（容器内用服务名访问；回调走容器内 app:80，由 nginx 反代到 backend）
+      VMQ_BASE_URL:              http://vmq:80
+      VMQ_NOTIFY_BASE:           ${VMQ_NOTIFY_BASE:-http://app:80}
       # ── ⚠️ DEPRECATED：方舟 PPT 智能体 / Coze Bot 已从 _do_ppt 移除 ──
       # PPT 现在走「本地两阶段豆包深度生成 + python-pptx 渲染」，
       # 只依赖 DOUBAO_API_KEY + DOUBAO_MODEL，下面这几行不会被代码读取，
@@ -30,16 +47,20 @@ services:
       COZE_PPT_TIMEOUT:          ${COZE_PPT_TIMEOUT:-300}
       COZE_POLL_INTERVAL:        ${COZE_POLL_INTERVAL:-2.0}
       # ── Postgres-backed 持久化队列 ──
-      MAX_CONCURRENT_TASKS:      ${MAX_CONCURRENT_TASKS:-8}
-      MAX_PER_USER_TASKS:        ${MAX_PER_USER_TASKS:-3}
+      MAX_CONCURRENT_TASKS:      ${MAX_CONCURRENT_TASKS:-6}
+      MAX_PER_USER_TASKS:        ${MAX_PER_USER_TASKS:-4}
       TASK_TIMEOUT_SEC:          ${TASK_TIMEOUT_SEC:-1200}
+      LESSON_TASK_TIMEOUT_SEC:   ${LESSON_TASK_TIMEOUT_SEC:-3600}
+      TOOL_TASK_TIMEOUT_SEC:     ${TOOL_TASK_TIMEOUT_SEC:-600}
       WORKER_LEASE_SEC:          ${WORKER_LEASE_SEC:-1800}
-      QUEUE_POLL_INTERVAL_MS:    ${QUEUE_POLL_INTERVAL_MS:-1000}
+      QUEUE_POLL_INTERVAL_MS:    ${QUEUE_POLL_INTERVAL_MS:-800}
       QUEUE_SWEEP_INTERVAL_SEC:  ${QUEUE_SWEEP_INTERVAL_SEC:-30}
-      QUEUE_GC_DAYS:             ${QUEUE_GC_DAYS:-7}
-      # ── 数据库连接池 ──（留空使用代码自适应默认：max(15, workers*2+5)）
-      # DB_POOL_SIZE:             ${DB_POOL_SIZE:-}
-      # DB_MAX_OVERFLOW:          ${DB_MAX_OVERFLOW:-}
+      QUEUE_GC_DAYS:             ${QUEUE_GC_DAYS:-3}
+      # 生产默认 3 天 GC（控制 queue_jobs 表体积）；本地 compose 默认 7
+      EXPORT_ORDER_TIMEOUT_SEC:  ${EXPORT_ORDER_TIMEOUT_SEC:-300}
+      # ── 连接池与 6 worker 配套（显式覆盖 database.py 自动计算）──
+      DB_POOL_SIZE:              ${DB_POOL_SIZE:-16}
+      DB_MAX_OVERFLOW:           ${DB_MAX_OVERFLOW:-6}
       DB_STATEMENT_TIMEOUT_MS:   ${DB_STATEMENT_TIMEOUT_MS:-120000}
       DB_COMMAND_TIMEOUT_SEC:    ${DB_COMMAND_TIMEOUT_SEC:-180}
     volumes:
@@ -58,5 +79,43 @@ services:
       start_period: 60s
       retries: 3
 
+  # V免签数据库（独立 MySQL，与 Supabase 隔离）
+  vmq-db:
+    image: mysql:5.7
+    environment:
+      MYSQL_ROOT_PASSWORD: ${VMQ_DB_ROOT_PASS:-vmqroot123}
+      MYSQL_DATABASE: vmq
+      MYSQL_USER: vmq
+      MYSQL_PASSWORD: ${VMQ_DB_PASS:-vmqpass123}
+    volumes:
+      - vmq_db_data:/var/lib/mysql
+      - ./vmq/vmq.sql:/docker-entrypoint-initdb.d/vmq.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${VMQ_DB_ROOT_PASS:-vmqroot123}"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  # V免签（xsidc/Vmqphp）。后台账号 lzf/lzf122406!（已预置），配好两码+通讯密钥。
+  # Coolify 给本服务配一个域名（如 pay.example.com）；手机监控端指向该域名。
+  # 后端 .env：VMQ_BASE_URL=http://vmq:80、VMQ_KEY=<同 vmq.sql key>、VMQ_NOTIFY_BASE=<后端公网域名>
+  vmq:
+    build: ./vmq
+    depends_on:
+      vmq-db:
+        condition: service_healthy
+    expose:
+      - "80"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost/"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+
 volumes:
   app_data:
+  vmq_db_data:

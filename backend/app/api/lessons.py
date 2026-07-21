@@ -1,18 +1,23 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from typing import Optional, List
+from sqlalchemy import select, cast, case, literal
+from sqlalchemy.sql import func
+from sqlalchemy.dialects.postgresql import JSONB
+from typing import Optional, List, Any
 import uuid
 import os
 import aiofiles
 from loguru import logger
 
 from app.core.config import settings
-from app.core.deps import get_db, get_current_active_user, resolve_documents_owner
+from app.core.deps import (
+    get_db, get_current_active_user, resolve_documents_owner, allow_include_deleted,
+    user_access_level, ACCESS_ADMIN,
+)
 from app.models.user import User
 from app.models.lesson import LessonPlan, LessonStatus, Discussion, Annotation
 from app.schemas.lesson import (
-    LessonResponse, LessonListResponse, DiscussionResponse,
+    LessonResponse, LessonListResponse, LessonStatusResponse, DiscussionResponse,
     AnnotationCreate, AnnotationResponse,
 )
 
@@ -30,16 +35,48 @@ async def _require_owned_lesson(
     current_user: User,
     for_user_id: Optional[str],
     lesson_id: str,
+    include_deleted: bool = False,
 ) -> tuple[User, LessonPlan]:
-    """Resolve scope owner and load lesson; 404 if not owned by owner."""
+    """Resolve scope owner and load lesson; 404 if not owned by owner.
+
+    By default skips soft-deleted lessons. Admins can opt-in via include_deleted=True.
+    """
     owner = await resolve_documents_owner(db, current_user, for_user_id)
-    result = await db.execute(
-        select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == owner.id)
-    )
+    q = select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == owner.id)
+    if not allow_include_deleted(current_user, include_deleted):
+        q = q.where(LessonPlan.deleted_at.is_(None))
+    result = await db.execute(q)
     lesson = result.scalar_one_or_none()
     if not lesson:
         raise HTTPException(status_code=404, detail="教案不存在")
     return owner, lesson
+
+
+def _fc_jsonb():
+    return cast(LessonPlan.final_content, JSONB)
+
+
+def _lesson_status_from_fc(lesson_id: str, status: str, progress: int, current_stage: int,
+                           current_phase: Optional[str], error_message: Optional[str],
+                           fc: Any) -> LessonStatusResponse:
+    data = fc if isinstance(fc, dict) else {}
+    draft = (data.get("full_draft") or "") if isinstance(data.get("full_draft"), str) else ""
+    optimized = (data.get("full_optimized") or "") if isinstance(data.get("full_optimized"), str) else ""
+    stages = data.get("stages") if isinstance(data.get("stages"), dict) else {}
+    return LessonStatusResponse(
+        id=lesson_id,
+        status=status,
+        progress=progress or 0,
+        current_stage=current_stage or 0,
+        current_phase=current_phase,
+        error_message=error_message,
+        material_draft_status=data.get("material_draft_status"),
+        material_optimized_status=data.get("material_optimized_status"),
+        styled_pdf_status=data.get("styled_pdf_status"),
+        has_full_draft=bool(draft.strip()),
+        has_full_optimized=bool(optimized.strip()),
+        has_stages=bool(stages),
+    )
 
 
 @router.post("", response_model=LessonResponse, status_code=201)
@@ -62,6 +99,7 @@ async def create_lesson(
     locale: str = Form("zh-CN"),
     parent_lesson_id: Optional[str] = Form(None),
     teacher_feedback: Optional[str] = Form(None),
+    textbook_ref: Optional[str] = Form(None),
     for_user_id: Optional[str] = Query(None, description="管理员：以指定用户身份创建教案并扣其配额"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
@@ -109,6 +147,7 @@ async def create_lesson(
         locale=locale,
         parent_lesson_id=parent_lesson_id,
         teacher_feedback=teacher_feedback,
+        textbook_ref=(textbook_ref or None),
         status=LessonStatus.QUEUED.value,
     )
     db.add(lesson)
@@ -118,11 +157,24 @@ async def create_lesson(
 
     from app.tasks.queue_manager import enqueue
     is_quick = mode == "quick"
-    await enqueue(
-        lesson.id,
-        user_id=str(owner.id),
-        kind="lesson_quick" if is_quick else "lesson",
-    )
+    try:
+        ok = await enqueue(
+            lesson.id,
+            user_id=str(owner.id),
+            kind="lesson_quick" if is_quick else "lesson",
+        )
+    except Exception as e:
+        owner.quota_remaining += 1
+        lesson.status = LessonStatus.FAILED.value
+        lesson.error_message = f"入队失败: {e}"[:500]
+        await db.commit()
+        raise HTTPException(status_code=503, detail="任务入队失败，配额已回滚，请稍后重试")
+    if not ok:
+        owner.quota_remaining += 1
+        lesson.status = LessonStatus.FAILED.value
+        lesson.error_message = "任务已在队列中或入队被拒绝"
+        await db.commit()
+        raise HTTPException(status_code=409, detail="该教案已有进行中的生成任务")
     logger.info(f"Enqueued {'quick' if is_quick else 'full'} lesson job for {lesson.id}")
 
     return LessonResponse.model_validate(lesson)
@@ -135,6 +187,7 @@ async def list_lessons(
     offset: int = 0,
     cursor: Optional[str] = None,
     for_user_id: Optional[str] = Query(None, description="管理员：列出指定用户的教案"),
+    include_deleted: bool = Query(False, description="管理员可见：包含软删除条目"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -147,8 +200,33 @@ async def list_lessons(
     """
     safe_limit = max(1, min(limit, 100))
     owner = await resolve_documents_owner(db, current_user, for_user_id)
+    include_deleted = allow_include_deleted(current_user, include_deleted)
 
-    query = select(LessonPlan).where(LessonPlan.user_id == owner.id)
+    fc = _fc_jsonb()
+    has_full_optimized_expr = case(
+        (func.coalesce(fc["full_optimized"].astext, "") != "", literal(True)),
+        else_=literal(False),
+    )
+    has_stages_expr = case(
+        (func.coalesce(fc["stages"].astext, "").notin_(("", "{}", "null")), literal(True)),
+        else_=literal(False),
+    )
+
+    query = select(
+        LessonPlan.id,
+        LessonPlan.title,
+        LessonPlan.subject,
+        LessonPlan.grade_level,
+        LessonPlan.status,
+        LessonPlan.progress,
+        LessonPlan.teaching_model_id,
+        LessonPlan.created_at,
+        LessonPlan.mode,
+        has_full_optimized_expr.label("has_full_optimized"),
+        has_stages_expr.label("has_stages"),
+    ).where(LessonPlan.user_id == owner.id)
+    if not include_deleted:
+        query = query.where(LessonPlan.deleted_at.is_(None))
     if status:
         query = query.where(LessonPlan.status == status)
 
@@ -166,43 +244,133 @@ async def list_lessons(
     result = await db.execute(query)
 
     out: List[LessonListResponse] = []
-    for l in result.scalars().all():
-        fc = l.final_content if isinstance(l.final_content, dict) else {}
-        stages = fc.get("stages") or {}
-        has_stages = bool(isinstance(stages, dict) and len(stages) > 0)
-        has_full_optimized = bool(fc.get("full_optimized"))
-        item = LessonListResponse(
-            id=l.id,
-            title=l.title,
-            subject=l.subject,
-            grade_level=l.grade_level,
-            status=l.status,
-            progress=l.progress or 0,
-            teaching_model_id=l.teaching_model_id,
-            created_at=l.created_at,
-            mode=getattr(l, "mode", None) or fc.get("mode"),
-            has_full_optimized=has_full_optimized,
-            has_stages=has_stages,
+    for row in result.all():
+        out.append(
+            LessonListResponse(
+                id=row.id,
+                title=row.title,
+                subject=row.subject,
+                grade_level=row.grade_level,
+                status=row.status,
+                progress=row.progress or 0,
+                teaching_model_id=row.teaching_model_id,
+                created_at=row.created_at,
+                mode=row.mode,
+                has_full_optimized=bool(row.has_full_optimized),
+                has_stages=bool(row.has_stages),
+            )
         )
-        out.append(item)
     return out
+
+
+@router.get("/{lesson_id}/status", response_model=LessonStatusResponse)
+async def get_lesson_status(
+    lesson_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：读取指定用户的教案状态"),
+    include_deleted: bool = Query(False, description="管理员可见：包含软删除条目"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Lightweight status for polling — avoids loading full final_content JSONB bodies."""
+    fc = _fc_jsonb()
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    q = select(
+        LessonPlan.id,
+        LessonPlan.status,
+        LessonPlan.progress,
+        LessonPlan.current_stage,
+        LessonPlan.current_phase,
+        LessonPlan.error_message,
+        fc["material_draft_status"].astext.label("material_draft_status"),
+        fc["material_optimized_status"].astext.label("material_optimized_status"),
+        fc["styled_pdf_status"].astext.label("styled_pdf_status"),
+        case(
+            (func.coalesce(fc["full_draft"].astext, "") != "", literal(True)),
+            else_=literal(False),
+        ).label("has_full_draft"),
+        case(
+            (func.coalesce(fc["full_optimized"].astext, "") != "", literal(True)),
+            else_=literal(False),
+        ).label("has_full_optimized"),
+        case(
+            (func.coalesce(fc["stages"].astext, "").notin_(("", "{}", "null")), literal(True)),
+            else_=literal(False),
+        ).label("has_stages"),
+    ).where(LessonPlan.id == lesson_id, LessonPlan.user_id == owner.id)
+    if not allow_include_deleted(current_user, include_deleted):
+        q = q.where(LessonPlan.deleted_at.is_(None))
+    row = (await db.execute(q)).one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="教案不存在")
+    return LessonStatusResponse(
+        id=row.id,
+        status=row.status,
+        progress=row.progress or 0,
+        current_stage=row.current_stage or 0,
+        current_phase=row.current_phase,
+        error_message=row.error_message,
+        material_draft_status=row.material_draft_status,
+        material_optimized_status=row.material_optimized_status,
+        styled_pdf_status=row.styled_pdf_status,
+        has_full_draft=bool(row.has_full_draft),
+        has_full_optimized=bool(row.has_full_optimized),
+        has_stages=bool(row.has_stages),
+    )
+
+
+def optimized_ready(lesson: LessonPlan) -> bool:
+    """优秀教案是否已生成：final_content.full_optimized 非空。"""
+    fc = getattr(lesson, "final_content", None)
+    if not isinstance(fc, dict):
+        return False
+    return bool(fc.get("full_optimized"))
+
+
+def _redact_lesson_content(resp: "LessonResponse", hide_optimized: bool) -> "LessonResponse":
+    """非管理员脱敏：
+    - 初步教案(full_draft / stages[*].draft)：**始终清空**（普通用户永不可见初稿）。
+    - 优秀教案(full_optimized / stages[*].content)：仅在尚未生成完成(hide_optimized)时清空。
+    保留 model_recommendation、环节名称/专家等结构元信息，供前端"教案详情/生成过程"展示。"""
+    fc = resp.final_content
+    if not isinstance(fc, dict):
+        return resp
+    import copy as _copy
+    fc = _copy.deepcopy(fc)
+    fc["full_draft"] = ""
+    if hide_optimized:
+        fc["full_optimized"] = ""
+    stages = fc.get("stages")
+    if isinstance(stages, dict):
+        for k, v in stages.items():
+            if isinstance(v, dict):
+                v["draft"] = ""
+                if hide_optimized:
+                    v["content"] = ""
+    resp.final_content = fc
+    return resp
 
 
 @router.get("/{lesson_id}", response_model=LessonResponse)
 async def get_lesson(
     lesson_id: str,
     for_user_id: Optional[str] = Query(None, description="管理员：读取指定用户的教案"),
+    include_deleted: bool = Query(False, description="管理员可见：包含软删除条目"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     owner = await resolve_documents_owner(db, current_user, for_user_id)
-    result = await db.execute(
-        select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == owner.id)
-    )
+    q = select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == owner.id)
+    if not allow_include_deleted(current_user, include_deleted):
+        q = q.where(LessonPlan.deleted_at.is_(None))
+    result = await db.execute(q)
     lesson = result.scalar_one_or_none()
     if not lesson:
         raise HTTPException(status_code=404, detail="教案不存在")
-    return LessonResponse.model_validate(lesson)
+    resp = LessonResponse.model_validate(lesson)
+    # 非管理员：初稿始终脱敏；优秀教案未生成完成前也脱敏（只给过程/结构信息）
+    if user_access_level(current_user) != ACCESS_ADMIN:
+        resp = _redact_lesson_content(resp, hide_optimized=not optimized_ready(lesson))
+    return resp
 
 
 @router.delete("/{lesson_id}", status_code=204)
@@ -212,14 +380,19 @@ async def delete_lesson(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    """Soft delete: mark deleted_at = now(). Admin can still see via include_deleted."""
     owner = await resolve_documents_owner(db, current_user, for_user_id)
     result = await db.execute(
-        select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == owner.id)
+        select(LessonPlan).where(
+            LessonPlan.id == lesson_id,
+            LessonPlan.user_id == owner.id,
+            LessonPlan.deleted_at.is_(None),
+        )
     )
     lesson = result.scalar_one_or_none()
     if not lesson:
         raise HTTPException(status_code=404, detail="教案不存在")
-    await db.delete(lesson)
+    lesson.deleted_at = func.now()
     await db.commit()
 
 
@@ -482,6 +655,8 @@ async def generate_next_lesson(
     current_user: User = Depends(get_current_active_user),
 ):
     """Generate a follow-up lesson based on the previous one and teacher feedback."""
+    if user_access_level(current_user) != ACCESS_ADMIN and not getattr(current_user, "can_next_lesson", True):
+        raise HTTPException(status_code=403, detail="当前账号无权使用此功能：can_next_lesson")
     owner, parent = await _require_owned_lesson(db, current_user, for_user_id, lesson_id)
 
     if teacher_feedback and not parent.teacher_feedback:

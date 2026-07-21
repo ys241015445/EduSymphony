@@ -1,0 +1,25 @@
+This package vendors and adapts the "edu-chem-reaction" skill from the
+edulab project.
+
+Upstream source : https://github.com/wy51ai/edulab
+Skill path      : skills/edu-chem-reaction
+License         : Apache License 2.0 (see LICENSE.upstream)
+Author          : wy51ai (edulab)
+
+Faithfully vendored (unmodified in behavior):
+  - reaction_kernel.py       (lib/reaction_kernel.py) — sympy balancing,
+                             conservation/mapping check, bond-diff, scene assembly
+  - molecules.py             (lib/molecules.py) — VSEPR molecule geometry library
+  - reaction_template.html   (template/reaction.html) — Three.js + KaTeX data-driven template
+
+Added for backend integration (original work, same Apache-2.0 terms):
+  - render.py    : render assembled data into the template, returning an HTML
+                   string (no filesystem write, no cwd dependency).
+  - presets.py   : the reaction build_* presets + REGISTRY (adapted from
+                   scripts/generate.py) plus generate_reaction_html(key).
+  - extract.py   : chemistry detection + classification of lesson content into a
+                   supported reaction preset (or None).
+
+RDKit is optional and is NEVER auto-installed; the VSEPR library is used when
+RDKit is unavailable. The upstream Apache-2.0 license text is retained in
+LICENSE.upstream.

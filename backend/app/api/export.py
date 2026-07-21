@@ -17,12 +17,17 @@ from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
 
 from app.core.config import settings
-from app.core.deps import get_db, get_current_active_user, resolve_documents_owner
+from app.core.deps import get_db, get_current_active_user, require_capability, resolve_documents_owner, require_export_payment, user_access_level, ACCESS_ADMIN
 from app.core.database import async_session_maker
 from app.models.user import User
 from app.models.lesson import LessonPlan, LessonSeries, DocumentVersion, ExportRecord
 
-router = APIRouter(prefix="/export", tags=["导出"])
+router = APIRouter(
+    prefix="/export",
+    tags=["导出"],
+    # can_export 能力门 + 付费闸门（管理员/白名单豁免；普通用户扣 1 次导出额度）
+    dependencies=[Depends(require_capability("can_export")), Depends(require_export_payment)],
+)
 
 # ───────────────────────────────────────────────────────────────────
 # 同步渲染器并发控制：PDF / DOCX 渲染会阻塞事件循环，扔到线程池跑
@@ -89,7 +94,14 @@ def _content_disposition(title: str, ext: str) -> str:
         return f"attachment; filename=\"{ascii_fallback}.{ext}\""
 
 
-async def _get_owner_lesson(lesson_id: str, db: AsyncSession, owner: User) -> LessonPlan:
+def _optimized_ready(lesson: LessonPlan) -> bool:
+    fc = getattr(lesson, "final_content", None)
+    return bool(isinstance(fc, dict) and fc.get("full_optimized"))
+
+
+async def _get_owner_lesson(
+    lesson_id: str, db: AsyncSession, owner: User, requester: Optional[User] = None
+) -> LessonPlan:
     result = await db.execute(
         select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == owner.id)
     )
@@ -98,6 +110,9 @@ async def _get_owner_lesson(lesson_id: str, db: AsyncSession, owner: User) -> Le
         raise HTTPException(status_code=404, detail="教案不存在")
     if not lesson.final_content:
         raise HTTPException(status_code=400, detail="教案尚未生成完成")
+    # 非管理员：优秀教案未生成完成前不可导出
+    if requester is not None and user_access_level(requester) != ACCESS_ADMIN and not _optimized_ready(lesson):
+        raise HTTPException(status_code=403, detail="优秀教案尚未生成完成，暂不能导出")
     return lesson
 
 
@@ -206,7 +221,7 @@ async def export_json(
 ):
     owner = await resolve_documents_owner(db, current_user, for_user_id)
     try:
-        lesson = await _get_owner_lesson(lesson_id, db, owner)
+        lesson = await _get_owner_lesson(lesson_id, db, owner, current_user)
         ver = None
         if version_id:
             ver = await _get_owner_version(version_id, db, owner, lesson_id)
@@ -274,7 +289,7 @@ async def export_txt(
 ):
     owner = await resolve_documents_owner(db, current_user, for_user_id)
     try:
-        lesson = await _get_owner_lesson(lesson_id, db, owner)
+        lesson = await _get_owner_lesson(lesson_id, db, owner, current_user)
         ver = None
         if version_id:
             ver = await _get_owner_version(version_id, db, owner, lesson_id)
@@ -440,7 +455,7 @@ async def export_markdown(
 ):
     owner = await resolve_documents_owner(db, current_user, for_user_id)
     try:
-        lesson = await _get_owner_lesson(lesson_id, db, owner)
+        lesson = await _get_owner_lesson(lesson_id, db, owner, current_user)
         if version_id:
             ver = await _get_owner_version(version_id, db, owner, lesson_id)
             md_body = (ver.content_markdown or "").encode("utf-8")
@@ -583,7 +598,7 @@ async def export_docx(
 ):
     owner = await resolve_documents_owner(db, current_user, for_user_id)
     try:
-        lesson = await _get_owner_lesson(lesson_id, db, owner)
+        lesson = await _get_owner_lesson(lesson_id, db, owner, current_user)
         if version_id:
             ver = await _get_owner_version(version_id, db, owner, lesson_id)
             d = _markdown_to_doc_sections(ver, lesson_title=lesson.title)
@@ -755,7 +770,7 @@ async def export_pdf(
 ):
     owner = await resolve_documents_owner(db, current_user, for_user_id)
     try:
-        lesson = await _get_owner_lesson(lesson_id, db, owner)
+        lesson = await _get_owner_lesson(lesson_id, db, owner, current_user)
         if version_id:
             ver = await _get_owner_version(version_id, db, owner, lesson_id)
             d = _markdown_to_doc_sections(ver, lesson_title=lesson.title)
@@ -886,7 +901,7 @@ async def generate_styled_pdf_html(
 ):
     """Start background task to generate styled PDF HTML, result saved to final_content."""
     owner = await resolve_documents_owner(db, current_user, for_user_id)
-    lesson = await _get_owner_lesson(lesson_id, db, owner)
+    lesson = await _get_owner_lesson(lesson_id, db, owner, current_user)
     fc = _parse_fc(lesson.final_content)
 
     if content_version == "optimized":
@@ -937,10 +952,148 @@ async def generate_styled_pdf_html(
         user_id=owner.id,
         max_attempts=2,
     )
+    await _record_export_safely(
+        db, owner.id,
+        lesson_plan_id=lesson_id,
+        format="html",
+        file_name=f"{(lesson.title or 'lesson')}_styled.html",
+        source_kind="styled_pdf",
+        status="queued",
+        params={"content_version": content_version, "template_type": template_type},
+    )
     return {"status": "queued", "message": "排版PDF生成任务已入队"}
 
 
 _MATERIAL_GEN_SYSTEM = """你是一位专业的课程材料制作老师，擅长将教学知识点转换为互动式、美观的HTML演示页面。你会生成完整的、可直接运行的HTML代码，包含现代化的CSS样式和交互式JavaScript功能。"""
+
+MATERIAL_DOUBAO_PROVIDER = "doubao"
+
+_MATERIAL_STAGE_A_SYSTEM = """你是一位专业的课程材料策划老师。请从完整教案中提炼结构化知识点，输出严格 JSON（不要 markdown 代码块、不要解释文字）。
+
+JSON 格式：
+{
+  "title": "课程标题",
+  "summary": "100-200字课程概述",
+  "sections": [
+    {
+      "id": "s1",
+      "title": "知识点标题",
+      "icon": "fa-book",
+      "content": "200-400字详细说明，可含 <ul><li>、<strong> 等简单 HTML",
+      "diagram_hint": "示意图/实验/现象的文字描述（供页面展示）",
+      "quiz": [{"question": "思考题", "answer": "参考答案"}]
+    }
+  ]
+}
+
+硬性要求：
+1. sections 至少 6 个，覆盖教案主要教学环节与核心概念
+2. 每个 section 的 content 纯文本不少于 150 字（不含 HTML 标签）
+3. 每个 section 至少 1 道 quiz（question + answer 均非空）
+4. icon 从 Font Awesome 6 类名选取（如 fa-book、fa-flask、fa-lightbulb）
+5. 只输出 JSON 本体"""
+
+
+def _parse_material_json(raw: str) -> dict:
+    """Parse AI JSON response for material Stage A."""
+    t = raw.strip()
+    if t.startswith("```"):
+        first_nl = t.index("\n") if "\n" in t else 3
+        t = t[first_nl + 1:]
+    if t.endswith("```"):
+        t = t[:-3]
+    return json.loads(t.strip())
+
+
+def _material_baseline(meta: dict) -> str:
+    """Teacher standard + K12/special-ed hints from lesson metadata."""
+    from app.services import teacher_standard as _teacher_standard
+    from app.services import k12_skills as _k12_skills
+    from app.services import special_ed_skills as _special_ed
+
+    locale = meta.get("locale") or "zh-CN"
+    text = "\n\n" + _teacher_standard.standard(locale)
+    if _k12_skills.is_k12(meta.get("education_level")):
+        text += "\n\n" + _k12_skills.lesson_skills(locale)
+    if _special_ed.is_special_ed(
+        subject=meta.get("subject"),
+        grade_level=meta.get("grade_level"),
+        topic=meta.get("topic"),
+        title=meta.get("title"),
+        student_type=meta.get("student_type"),
+    ):
+        text += "\n\n" + _special_ed.lesson_skills(locale)
+    return text
+
+
+def _build_material_stage_a_prompt(meta: dict) -> str:
+    title = meta.get("title") or "课程演示"
+    content = meta.get("content") or ""
+    version = meta.get("content_version") or "draft"
+    version_label = "优化教案" if version == "optimized" else "初步教案"
+    return (
+        f'课程标题：{title}\n'
+        f'内容版本：{version_label}\n\n'
+        f'完整教案内容：\n{content[:12000]}\n\n'
+        "请提炼至少 6 个知识点 section，每个 content 200-400 字，每节至少 1 道思考题。"
+    )
+
+
+async def _generate_material_outline(ai, meta: dict) -> dict:
+    """Stage A: 豆包从教案抽取结构化 JSON。"""
+    from app.services.material_html_service import normalize_material_data
+
+    prompt = _build_material_stage_a_prompt(meta)
+    sys = _MATERIAL_STAGE_A_SYSTEM + _material_baseline(meta)
+    raw = await ai.generate(
+        prompt,
+        provider_name=MATERIAL_DOUBAO_PROVIDER,
+        max_tokens=8000,
+        temperature=0.4,
+        system_message=sys,
+    )
+    return normalize_material_data(_parse_material_json(raw))
+
+
+async def _expand_material_sections(ai, meta: dict, data: dict) -> dict:
+    """补全/扩写 sections（校验不合格时重试一次）。"""
+    from app.services.material_html_service import normalize_material_data
+
+    prompt = (
+        f'课程：{meta.get("title") or "课程"}\n'
+        f'当前 JSON（sections 不足或过短）：\n{json.dumps(data, ensure_ascii=False)[:6000]}\n\n'
+        f'教案节选：\n{(meta.get("content") or "")[:8000]}\n\n'
+        "请扩写并补全 sections：至少 6 个，每个 content ≥150 字，每节至少 1 道 quiz。"
+        "只输出完整 JSON 本体。"
+    )
+    sys = _MATERIAL_STAGE_A_SYSTEM + _material_baseline(meta)
+    raw = await ai.generate(
+        prompt,
+        provider_name=MATERIAL_DOUBAO_PROVIDER,
+        max_tokens=8000,
+        temperature=0.35,
+        system_message=sys,
+    )
+    return normalize_material_data(_parse_material_json(raw))
+
+
+def _material_fallback_prompt(meta: dict) -> str:
+    """Last-resort 单轮 HTML prompt（豆包 fallback）。"""
+    title = meta.get("title") or "课程演示"
+    content = meta.get("content") or ""
+    return f"""你是一位专业的课程材料制作老师，请为课程"{title}"生成一个丰富、交互式的HTML演示页面。
+
+完整教案内容：
+{content[:12000]}
+
+要求：
+- 完整 HTML（<!DOCTYPE html> 起），内联 CSS/JS
+- 顶部控制栏：全屏、主题切换、章节导航
+- 至少 6 个知识点卡片，每卡 200+ 字 + 思考题（点击显隐答案）
+- 所有按钮必须绑定可运行的 JavaScript（addEventListener）
+- 使用 Font Awesome CDN
+
+请直接输出完整 HTML 代码。"""
 
 
 @router.post("/material/generate/{lesson_id}")
@@ -953,7 +1106,7 @@ async def generate_course_material_html(
 ):
     """Start background task to generate interactive HTML course material, result saved to final_content."""
     owner = await resolve_documents_owner(db, current_user, for_user_id)
-    lesson = await _get_owner_lesson(lesson_id, db, owner)
+    lesson = await _get_owner_lesson(lesson_id, db, owner, current_user)
     fc = _parse_fc(lesson.final_content)
 
     if content_version == "optimized":
@@ -966,63 +1119,36 @@ async def generate_course_material_html(
 
     lesson_title = lesson.title or "课程演示"
 
-    prompt = f"""你是一位专业的课程材料制作老师，请为课程"{lesson_title}"生成一个丰富、交互式的HTML演示页面。
-
-完整教案内容：
-{content[:8000]}
-
-要求：
-
-**1. 完整HTML结构 + 顶部控制栏**：
-- 包含<!DOCTYPE html>、<html>、<head>、<body>等完整标签
-- 页面顶部固定控制栏，包含：
-  * 全屏按钮（使用JavaScript requestFullscreen API）
-  * 缩放按钮（放大/缩小/重置，使用CSS transform scale）
-  * 主题切换（亮色/暗色模式）
-  * 导航菜单（快速跳转到各知识点）
-
-**2. 丰富的知识点卡片**（每个知识点包含）：
-- 📖 知识点标题 + 图标
-- 📝 详细说明（150-300字）
-- 🎨 CSS/SVG绘制的示意图
-- 🎬 CSS3动画演示
-- 🔬 互动实验区（按钮点击触发动画/效果）
-- 📚 知识拓展（科学原理、历史故事、生活应用）
-- ❓ 思考题（2-3个）+ 点击显示答案
-
-**3. 视觉动画和图形**：
-- SVG动画展示科学现象
-- Canvas动画模拟实验
-- CSS关键帧动画
-- 交互式图表和图示
-
-**4. 交互体验**：
-- 卡片展开/收起动画
-- 滑块拖动改变参数
-- 按钮触发演示效果
-- 进度追踪（已学习的知识点标记）
-- 答题互动
-
-**5. 响应式 + 美观排版**：
-- 移动端、平板、桌面适配
-- 渐变背景、卡片阴影
-- 流畅的滚动体验
-- 清晰的层次结构
-
-**6. 技术要求**：
-- 所有CSS、JavaScript内联
-- 使用Font Awesome CDN（<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">）
-- 代码完整可运行
-
-请直接输出完整HTML代码，从<!DOCTYPE html>开始，创建一个内容丰富、视觉精美、交互性强的课程演示页面。"""
+    material_meta = {
+        "title": lesson_title,
+        "content": content,
+        "content_version": content_version,
+        "locale": getattr(lesson, "locale", None) or "zh-CN",
+        "subject": getattr(lesson, "subject", None) or "",
+        "grade_level": getattr(lesson, "grade_level", None) or "",
+        "topic": getattr(lesson, "topic", None) or "",
+        "education_level": getattr(lesson, "education_level", None) or "",
+        "student_type": getattr(lesson, "student_type", None) or "",
+    }
 
     status_key = f"material_{content_version}_status"
     error_key = f"material_{content_version}_error"
-    prompt_key = f"material_{content_version}_prompt"
-    fc = {**fc, status_key: "generating", prompt_key: prompt}
+    meta_key = f"material_{content_version}_meta"
+    fc = {**fc, status_key: "generating", meta_key: material_meta}
     fc.pop(error_key, None)
+    fc.pop(f"material_{content_version}_engine", None)
     lesson.final_content = fc
     await db.commit()
+
+    await _record_export_safely(
+        db, owner.id,
+        lesson_plan_id=lesson_id,
+        format="html",
+        file_name=f"{(lesson.title or 'lesson')}_material_{content_version}.html",
+        source_kind="material",
+        status="queued",
+        params={"content_version": content_version},
+    )
 
     from app.tasks.queue_manager import enqueue
     await enqueue(
@@ -1032,6 +1158,101 @@ async def generate_course_material_html(
         max_attempts=2,
     )
     return {"status": "queued", "message": "教学材料生成任务已入队"}
+
+
+# ---------------------------------------------------------------------------
+# 立体几何「图片入口」：上传题目图片 → qwen-vl 识别 spec →（前端确认）→ 精确出交互3D页
+# ---------------------------------------------------------------------------
+
+_ALLOWED_IMAGE_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8MB
+
+
+@router.post("/geometry/recognize-image")
+async def recognize_geometry_image(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """读题目图片 → 结构化 problem spec（回显给用户确认，不落库、图片不落盘）。"""
+    mime = (file.content_type or "").lower()
+    if mime not in _ALLOWED_IMAGE_MIME:
+        raise HTTPException(status_code=400, detail="仅支持 PNG/JPG/WEBP/GIF 图片")
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="图片为空")
+    if len(data) > _MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail="图片过大（上限 8MB）")
+
+    from app.services.ai_service import AIService
+    from app.services.geometry_skill.vision import extract_spec_from_image
+    from app.services.geometry_skill.driver import build_lesson_data
+
+    spec = await extract_spec_from_image(data, mime, AIService())
+    if not spec:
+        return {"ok": False, "reason": "未能从图片识别出受支持的立体几何题，请换一张更清晰的图或改用文字。"}
+    # 二次确认可解：用确定性 driver 试算，不通过则视为不支持
+    try:
+        build_lesson_data(spec)
+    except Exception as e:
+        logger.info(f"[geometry] recognized spec not solvable: {e}")
+        return {"ok": False, "reason": "识别到的题目暂不在可精确求解范围内。"}
+
+    return {"ok": True, "spec": spec, "title": spec.get("title") or ""}
+
+
+@router.post("/material/generate-from-spec/{lesson_id}")
+async def generate_material_from_spec(
+    lesson_id: str,
+    spec: str = Form(...),
+    content_version: str = Form("draft"),
+    for_user_id: Optional[str] = Query(None, description="管理员：代指定用户写入"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """用（确认后的）立体几何 spec 精确生成交互 3D 教学页，写入 material_*_html，复用预览/下载。"""
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    lesson = await _get_owner_lesson(lesson_id, db, owner, current_user)  # 校验归属
+
+    try:
+        spec_obj = json.loads(spec)
+    except Exception:
+        raise HTTPException(status_code=400, detail="spec 不是合法 JSON")
+
+    from app.services.geometry_skill import generate_solid_geometry_html
+    from app.services.geometry_skill.driver import UnsupportedSpec
+    try:
+        html = generate_solid_geometry_html(spec_obj)
+    except UnsupportedSpec as e:
+        raise HTTPException(status_code=400, detail=f"该题目不在可精确求解范围内：{e}")
+    except Exception as e:
+        logger.warning(f"[geometry] generate-from-spec failed: {e}")
+        raise HTTPException(status_code=500, detail="生成失败，请重试或改用文字入口")
+
+    version = "optimized" if content_version == "optimized" else "draft"
+    await _bg_update_fc(lesson_id, {
+        f"material_{version}_status": "done",
+        f"material_{version}_html": html,
+        f"material_{version}_engine": "edu-solid-geometry",
+    })
+    await _record_export_safely(
+        db, owner.id, lesson_plan_id=lesson_id,
+        format="html", file_name=f"{(lesson.title or 'lesson')}_material_{version}.html",
+        source_kind="material", status="done",
+        file_size=len(html.encode("utf-8")),
+        params={"content_version": version, "variant": "solid_geometry_image"},
+    )
+    sio = _get_sio()
+    if sio:
+        try:
+            await sio.emit("bg_task_complete", {
+                "lesson_id": lesson_id, "task": "material",
+                "content_version": version, "status": "done",
+                "engine": "edu-solid-geometry",
+            }, room=f"lesson_{lesson_id}")
+        except Exception:
+            pass
+    return {"ok": True, "content_version": version}
 
 
 # ---------------------------------------------------------------------------
@@ -1056,6 +1277,52 @@ async def _bg_update_fc(lesson_id: str, updates: dict):
         fc = {**_parse_fc(lesson.final_content), **updates}
         lesson.final_content = fc
         await session.commit()
+
+
+async def _finalize_bg_export_record(
+    lesson_id: str,
+    *,
+    source_kind: str,
+    status: str,
+    error: Optional[str] = None,
+    content_version: Optional[str] = None,
+    file_size: Optional[int] = None,
+) -> None:
+    """Mark the most recent queued ExportRecord for (lesson_id, source_kind[, content_version])
+    as completed / failed. Non-fatal on any error (the bg task already succeeded/failed
+    independently of the audit record)."""
+    try:
+        async with async_session_maker() as session:
+            q = (
+                select(ExportRecord)
+                .where(
+                    ExportRecord.lesson_plan_id == lesson_id,
+                    ExportRecord.source_kind == source_kind,
+                    ExportRecord.status == "queued",
+                )
+                .order_by(ExportRecord.created_at.desc())
+                .limit(8)
+            )
+            rows = (await session.execute(q)).scalars().all()
+            target: Optional[ExportRecord] = None
+            for r in rows:
+                if content_version is None:
+                    target = r
+                    break
+                p = r.params or {}
+                if (p.get("content_version") or "draft") == content_version:
+                    target = r
+                    break
+            if not target:
+                return
+            target.status = status
+            if status == "failed" and error:
+                target.error_message = error[:2000]
+            if file_size is not None:
+                target.file_size = file_size
+            await session.commit()
+    except Exception as e:
+        logger.warning(f"_finalize_bg_export_record failed (non-fatal): {e}")
 
 
 async def run_styled_pdf_job(lesson_id: str):
@@ -1089,14 +1356,29 @@ async def run_material_job(lesson_id: str):
     # 找还在 generating 的 version
     for v in ("draft", "optimized"):
         if fc.get(f"material_{v}_status") == "generating":
-            prompt = fc.get(f"material_{v}_prompt") or ""
-            if not prompt:
+            meta = fc.get(f"material_{v}_meta")
+            # 兼容旧任务：仍读 prompt 字段
+            if not meta and fc.get(f"material_{v}_prompt"):
+                content = fc.get("full_optimized", "") if v == "optimized" else fc.get("full_draft", "")
+                meta = {
+                    "title": lesson.title or "课程演示",
+                    "content": content or "",
+                    "content_version": v,
+                    "locale": getattr(lesson, "locale", None) or "zh-CN",
+                    "subject": getattr(lesson, "subject", None) or "",
+                    "grade_level": getattr(lesson, "grade_level", None) or "",
+                    "topic": getattr(lesson, "topic", None) or "",
+                    "education_level": getattr(lesson, "education_level", None) or "",
+                    "student_type": getattr(lesson, "student_type", None) or "",
+                    "legacy_prompt": fc.get(f"material_{v}_prompt"),
+                }
+            if not meta:
                 await _bg_update_fc(lesson_id, {
                     f"material_{v}_status": "error",
-                    f"material_{v}_error": "任务参数缺失：material_*_prompt 为空",
+                    f"material_{v}_error": "任务参数缺失：material_*_meta 为空",
                 })
                 return
-            await _bg_generate_material(lesson_id, v, prompt)
+            await _bg_generate_material(lesson_id, v, meta)
             return
     logger.info(f"[material] no generating version for lesson {lesson_id}; skipping")
 
@@ -1123,6 +1405,10 @@ async def _bg_generate_styled_pdf(lesson_id: str, prompt: str):
             "styled_pdf_status": "done",
             "styled_pdf_html": html_clean,
         })
+        await _finalize_bg_export_record(
+            lesson_id, source_kind="styled_pdf", status="done",
+            file_size=len(html_clean.encode("utf-8")),
+        )
 
         sio = _get_sio()
         if sio:
@@ -1140,6 +1426,9 @@ async def _bg_generate_styled_pdf(lesson_id: str, prompt: str):
             "styled_pdf_status": "error",
             "styled_pdf_error": str(e),
         })
+        await _finalize_bg_export_record(
+            lesson_id, source_kind="styled_pdf", status="failed", error=str(e),
+        )
         sio = _get_sio()
         if sio:
             try:
@@ -1151,50 +1440,184 @@ async def _bg_generate_styled_pdf(lesson_id: str, prompt: str):
                 pass
 
 
-async def _bg_generate_material(lesson_id: str, content_version: str, prompt: str):
-    """Background task: generate interactive HTML course material via AI, save to final_content."""
+async def _try_solid_geometry_material(lesson_id: str, content_version: str) -> Optional[str]:
+    """数学立体几何题 → 用移植的 edu-solid-geometry skill 生成精确可交互 3D 教学网页。
+
+    命中返回 HTML 字符串；非数学/非立体几何/抽取失败/题型不支持一律返回 None，
+    由调用方静默回退到现有 AI 生成，保证不劣化既有能力。
+    """
+    try:
+        async with async_session_maker() as session:
+            res = await session.execute(select(LessonPlan).where(LessonPlan.id == lesson_id))
+            lesson = res.scalar_one_or_none()
+        if not lesson:
+            return None
+        fc = _parse_fc(lesson.final_content)
+        content = (fc.get("full_optimized" if content_version == "optimized" else "full_draft") or "")
+        if not content:
+            return None
+
+        from app.services.geometry_skill.extract import looks_like_solid_geometry, extract_spec
+        if not looks_like_solid_geometry(lesson.subject, content):
+            return None
+
+        from app.services.ai_service import AIService
+        from app.services.geometry_skill import generate_solid_geometry_html
+        spec = await extract_spec(content, AIService(), title=(lesson.title or ""))
+        if not spec:
+            return None
+        html = generate_solid_geometry_html(spec)
+        logger.info(f"[material] solid-geometry skill hit for lesson {lesson_id} "
+                    f"(body={spec.get('body')}, query={(spec.get('query') or {}).get('type')})")
+        return html
+    except Exception as e:
+        logger.warning(f"[material] solid-geometry skill path failed (fallback to AI): {e}")
+        return None
+
+
+async def _try_chem_reaction_material(lesson_id: str, content_version: str) -> Optional[str]:
+    """化学反应 → 用移植的 edu-chem-reaction skill 生成微观 3D 交互反应演示网页。
+
+    命中返回 HTML；非化学/未命中内置反应预设/任何异常一律返回 None，静默回退现有 AI 生成。
+    """
+    try:
+        async with async_session_maker() as session:
+            res = await session.execute(select(LessonPlan).where(LessonPlan.id == lesson_id))
+            lesson = res.scalar_one_or_none()
+        if not lesson:
+            return None
+        fc = _parse_fc(lesson.final_content)
+        content = (fc.get("full_optimized" if content_version == "optimized" else "full_draft") or "")
+        if not content:
+            return None
+
+        from app.services.chem_skill import looks_like_chemistry, classify_reaction, generate_reaction_html
+        if not looks_like_chemistry(lesson.subject, content):
+            return None
+
+        from app.services.ai_service import AIService
+        key = await classify_reaction(content, AIService())
+        if not key:
+            return None
+        html = generate_reaction_html(key)
+        logger.info(f"[material] chem-reaction skill hit for lesson {lesson_id} (reaction={key})")
+        return html
+    except Exception as e:
+        logger.warning(f"[material] chem-reaction skill path failed (fallback to AI): {e}")
+        return None
+
+
+async def _bg_generate_material(lesson_id: str, content_version: str, meta: dict):
+    """Background task: doubao two-stage material (JSON → template HTML), fallback to single-shot."""
+    from app.services.material_html_service import (
+        build_material_html, validate_material_data,
+    )
+
     status_key = f"material_{content_version}_status"
     html_key = f"material_{content_version}_html"
     error_key = f"material_{content_version}_error"
+    engine_key = f"material_{content_version}_engine"
 
-    try:
-        from app.services.ai_service import AIService
-        ai = AIService()
-        collected = []
-        async for chunk in ai.generate_stream(
-            prompt=prompt,
-            provider_name="deepseek",
-            temperature=0.7,
-            max_tokens=16000,
-            system_message=_MATERIAL_GEN_SYSTEM,
-        ):
-            collected.append(chunk)
-
-        html_raw = "".join(collected)
-        html_clean = _clean_ai_html(html_raw)
-
+    async def _finish(html: str, engine: str):
         await _bg_update_fc(lesson_id, {
             status_key: "done",
-            html_key: html_clean,
+            html_key: html,
+            engine_key: engine,
         })
-
+        await _finalize_bg_export_record(
+            lesson_id, source_kind="material", status="done",
+            content_version=content_version,
+            file_size=len(html.encode("utf-8")),
+        )
         sio = _get_sio()
         if sio:
             try:
                 await sio.emit("bg_task_complete", {
                     "lesson_id": lesson_id, "task": "material",
                     "content_version": content_version, "status": "done",
+                    "engine": engine,
                 }, room=f"lesson_{lesson_id}")
             except Exception:
                 pass
 
-        logger.info(f"Material bg generation complete for {lesson_id} ({content_version})")
+    try:
+        # 数学立体几何题：优先走确定性精确求解 + Three.js 交互页
+        skill_html = await _try_solid_geometry_material(lesson_id, content_version)
+        if skill_html:
+            await _finish(skill_html, "edu-solid-geometry")
+            logger.info(f"Material (solid-geometry skill) complete for {lesson_id}/{content_version}")
+            return
+
+        # 化学反应 skill
+        chem_html = await _try_chem_reaction_material(lesson_id, content_version)
+        if chem_html:
+            await _finish(chem_html, "edu-chem-reaction")
+            logger.info(f"Material (chem-reaction skill) complete for {lesson_id}/{content_version}")
+            return
+
+        from app.services.ai_service import AIService
+        ai = AIService()
+        locale = meta.get("locale") or "zh-CN"
+
+        # 兼容旧 prompt 任务：直接走 fallback 单轮
+        if meta.get("legacy_prompt"):
+            collected = []
+            async for chunk in ai.generate_stream(
+                prompt=meta["legacy_prompt"],
+                provider_name=MATERIAL_DOUBAO_PROVIDER,
+                temperature=0.7,
+                max_tokens=16000,
+                system_message=_MATERIAL_GEN_SYSTEM,
+            ):
+                collected.append(chunk)
+            html_clean = _clean_ai_html("".join(collected))
+            await _finish(html_clean, "doubao_single_shot")
+            logger.info(f"Material (legacy single-shot) complete for {lesson_id}/{content_version}")
+            return
+
+        # Stage A: 豆包抽 JSON 结构
+        data = await _generate_material_outline(ai, meta)
+        ok, reason = validate_material_data(data)
+        if not ok:
+            logger.warning(f"[material] outline validation failed ({reason}), expanding once")
+            data = await _expand_material_sections(ai, meta, data)
+            ok, reason = validate_material_data(data)
+
+        if ok:
+            html_out = build_material_html(data, lang=locale)
+            await _finish(html_out, "doubao_two_stage")
+            logger.info(
+                f"Material (doubao_two_stage) complete for {lesson_id}/{content_version} "
+                f"sections={len(data.get('sections') or [])} bytes={len(html_out)}"
+            )
+            return
+
+        # Fallback: 豆包单轮 HTML
+        logger.warning(f"[material] two-stage validation still failed ({reason}), fallback single-shot")
+        fb_prompt = _material_fallback_prompt(meta)
+        collected = []
+        async for chunk in ai.generate_stream(
+            prompt=fb_prompt,
+            provider_name=MATERIAL_DOUBAO_PROVIDER,
+            temperature=0.7,
+            max_tokens=16000,
+            system_message=_MATERIAL_GEN_SYSTEM + _material_baseline(meta),
+        ):
+            collected.append(chunk)
+        html_clean = _clean_ai_html("".join(collected))
+        await _finish(html_clean, "doubao_single_shot")
+        logger.info(f"Material (doubao_single_shot fallback) complete for {lesson_id}/{content_version}")
+
     except Exception as e:
         logger.error(f"Material bg task failed for {lesson_id}: {e}\n{traceback.format_exc()}")
         await _bg_update_fc(lesson_id, {
             status_key: "error",
             error_key: str(e),
         })
+        await _finalize_bg_export_record(
+            lesson_id, source_kind="material", status="failed", error=str(e),
+            content_version=content_version,
+        )
         sio = _get_sio()
         if sio:
             try:
@@ -1213,11 +1636,13 @@ async def _bg_generate_material(lesson_id: str, content_version: str, prompt: st
 class HtmlToPdfRequest(BaseModel):
     html: str
     title: str = "lesson_plan"
+    lesson_plan_id: Optional[str] = None
 
 
 @router.post("/styled-pdf/html-to-pdf")
 async def convert_html_to_pdf(
     body: HtmlToPdfRequest,
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """Convert an HTML string to a downloadable PDF using xhtml2pdf."""
@@ -1251,6 +1676,15 @@ async def convert_html_to_pdf(
         if len(pdf_bytes) < 100:
             raise Exception("生成的PDF文件过小，可能转换失败")
 
+        await _record_export_safely(
+            db, current_user.id,
+            lesson_plan_id=body.lesson_plan_id,
+            format="pdf",
+            file_name=f"{body.title}.pdf",
+            file_size=len(pdf_bytes),
+            source_kind="styled_pdf",
+            params={"title": body.title},
+        )
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
@@ -2069,6 +2503,11 @@ async def export_series_merged_async(
         user_id=owner.id,
         max_attempts=2,
     )
+    if not ok:
+        record.status = "failed"
+        record.error_message = "任务入队失败或已有相同任务在队列中"
+        await db.commit()
+        await db.refresh(record)
 
     return _AsyncExportResponse(
         record_id=record.id,
@@ -2125,6 +2564,11 @@ async def export_series_zip_async(
         user_id=owner.id,
         max_attempts=2,
     )
+    if not ok:
+        record.status = "failed"
+        record.error_message = "任务入队失败或已有相同任务在队列中"
+        await db.commit()
+        await db.refresh(record)
 
     return _AsyncExportResponse(
         record_id=record.id,

@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.deps import get_current_active_user, require_not_limited, resolve_documents_owner
+from app.core.deps import get_current_active_user, require_not_limited, require_capability, resolve_documents_owner, require_export_payment
 from app.models.course_tool import CourseToolResult
 from app.models.user import User
 from app.services.template_fill_service import (
@@ -37,7 +37,11 @@ from app.services.template_fill_service import (
     fill as tf_fill,
 )
 
-router = APIRouter(prefix="/template-fill", tags=["模板AI填写"], dependencies=[Depends(require_not_limited)])
+router = APIRouter(
+    prefix="/template-fill",
+    tags=["模板AI填写"],
+    dependencies=[Depends(require_not_limited), Depends(require_capability("can_template_fill"))],
+)
 
 TOOL_TYPE = "template_fill"
 
@@ -370,7 +374,7 @@ async def generate_endpoint(
     }
 
 
-@router.get("/{result_id}/download")
+@router.get("/{result_id}/download", dependencies=[Depends(require_export_payment)])
 async def download_endpoint(
     result_id: str,
     format: str = Query("", description="目标格式，缺省使用原格式"),
@@ -404,6 +408,15 @@ async def download_endpoint(
         "Content-Disposition": _cd(title, target),
         "X-Conversion-Lossy": "1" if lossy else "0",
     }
+    from app.api.export import _record_export_safely
+    await _record_export_safely(
+        db, owner.id,
+        format=target,
+        file_name=f"{title}.{target}",
+        file_size=len(out_bytes),
+        source_kind="template_fill",
+        params={"result_id": result_id, "target_format": target, "src_ext": src_ext, "lossy": bool(lossy)},
+    )
     return Response(
         content=out_bytes,
         media_type=MIME_BY_EXT.get(target, "application/octet-stream"),

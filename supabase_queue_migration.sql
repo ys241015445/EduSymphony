@@ -11,7 +11,7 @@
 
 CREATE TABLE IF NOT EXISTS queue_jobs (
     id           BIGSERIAL PRIMARY KEY,
-    target_id    VARCHAR(36) NOT NULL,               -- lesson_id / series_id 等
+    target_id    VARCHAR(128) NOT NULL,              -- lesson_id / {uuid}::{idx} 等
     kind         VARCHAR(40) NOT NULL,               -- lesson / syllabus / continue / ...
     user_id      VARCHAR(36),                        -- 用户级公平依据（可为 NULL）
     status       VARCHAR(20) NOT NULL DEFAULT 'queued',

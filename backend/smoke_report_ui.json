@@ -1,0 +1,54 @@
+{
+  "started_at": "2026-07-21T06:12:45.709879+00:00",
+  "base_url": "http://localhost:3002",
+  "frontend_url": "http://localhost:3000",
+  "dry_run": true,
+  "ui": true,
+  "summary": {
+    "pass": 1,
+    "fail": 2,
+    "skip": 1
+  },
+  "cases": [
+    {
+      "name": "material_html_local",
+      "method": "LOCAL",
+      "path": "-",
+      "status": "pass",
+      "http_status": null,
+      "detail": "",
+      "ms": 5.211299983784556,
+      "module": "material_local"
+    },
+    {
+      "name": "health",
+      "method": "GET",
+      "path": "/health",
+      "status": "fail",
+      "http_status": 502,
+      "detail": "status=502",
+      "ms": 84.73490001051687,
+      "module": "system"
+    },
+    {
+      "name": "auth_login",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "status": "fail",
+      "http_status": 502,
+      "detail": "",
+      "ms": 90.70520001114346,
+      "module": "auth"
+    },
+    {
+      "name": "ui_skipped",
+      "method": "UI",
+      "path": "-",
+      "status": "skip",
+      "http_status": null,
+      "detail": "API login failed",
+      "ms": 0.0,
+      "module": "ui"
+    }
+  ]
+}

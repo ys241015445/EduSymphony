@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Bell, Loader2, FileText, Presentation, ClipboardList, Dumbbell, ExternalLink, AlertTriangle } from 'lucide-react'
+import { Bell, Loader2, FileText, Presentation, ClipboardList, Dumbbell, ExternalLink, AlertTriangle, Image, Layers } from 'lucide-react'
 import { useJobsStore, ToolType } from '../../stores/jobsStore'
 import { useT } from '../../i18n/translations'
 
@@ -9,23 +9,31 @@ const ICON: Record<ToolType, typeof FileText> = {
   ppt: Presentation,
   exercises: ClipboardList,
   practice: Dumbbell,
+  comic: Image,
+  cards: Layers,
 }
 
 export default function JobsBadge() {
   const t = useT()
   const items = useJobsStore((s) => s.items)
   const initialized = useJobsStore((s) => s.initialized)
-  const refresh = useJobsStore((s) => s.refreshFromServer)
-  const bindSocket = useJobsStore((s) => s.bindSocket)
   const remove = useJobsStore((s) => s.remove)
 
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    bindSocket()
-    if (!initialized) refresh()
-  }, [bindSocket, initialized, refresh])
+    useJobsStore.getState().bindSocket()
+    if (!initialized) useJobsStore.getState().refreshFromServer()
+  }, [initialized])
+
+  // 兜底轮询：有在途任务时每 4s 同步一次服务端状态（补齐漏收的 socket / 跨实例状态）
+  const activeCount = items.filter((i) => i.status === 'queued' || i.status === 'running').length
+  useEffect(() => {
+    if (activeCount === 0) return
+    const id = window.setInterval(() => { void useJobsStore.getState().refreshFromServer() }, 4000)
+    return () => window.clearInterval(id)
+  }, [activeCount])
 
   useEffect(() => {
     const h = (e: MouseEvent) => {

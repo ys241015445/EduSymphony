@@ -88,3 +88,13 @@ async def run_exercises_job(target_id: str) -> None:
 async def run_practice_job(target_id: str) -> None:
     from app.api.course_tools import _do_practice
     await _run_tool_job(target_id, "tool_practice", _do_practice)
+
+
+async def run_comic_job(target_id: str) -> None:
+    from app.api.course_tools import _do_comic
+    await _run_tool_job(target_id, "tool_comic", _do_comic)
+
+
+async def run_cards_job(target_id: str) -> None:
+    from app.api.course_tools import _do_cards
+    await _run_tool_job(target_id, "tool_cards", _do_cards)

@@ -17,11 +17,22 @@ RUN echo "deb https://mirrors.aliyun.com/debian bookworm main contrib non-free n
 
 # pkg-config + libcairo2-dev 是 pycairo 源码编译必须（依赖链 xhtml2pdf → svglib
 # → rlpycairo → pycairo，PyPI 上没有 cp311 manylinux wheel 时会回退源码编译）
+#
+# libreoffice-writer + 中文字体（fonts-wqy-zenhei / fonts-noto-cjk）供珠科教案
+# 助手的 docx → pdf 真格式转换使用：
+#   app/services/zhuke_lesson.py convert_docx_to_pdf_via_soffice 通过
+#   subprocess 调 soffice --headless --convert-to pdf，可保留 Word 模板的
+#   表格、字体、下划线、分页等所有排版细节。
+# 教学材料 HTML 走豆包两阶段（app/services/material_html_service.py）。
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ curl \
     pkg-config libcairo2-dev \
-    fonts-wqy-zenhei \
+    libreoffice-writer libreoffice-core \
+    fonts-wqy-zenhei fonts-wqy-microhei fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
+
+# 构建期硬校验：LibreOffice 未装上则 build 直接失败，避免运行期 PDF 503
+RUN soffice --version && test -x "$(command -v soffice)"
 
 # 阿里云 pip 源（国内构建加速）+ 更长超时 + 重试
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \

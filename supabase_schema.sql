@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS users (
     role        VARCHAR(20)  NOT NULL DEFAULT 'free',       -- free / personal / school
     quota_remaining INTEGER  NOT NULL DEFAULT 100,
     access_level VARCHAR(20)  NOT NULL DEFAULT 'full',  -- full | limited | admin
+    -- 导出付费闸门（V免签充值额度）：剩余导出额度 + 免付费白名单
+    export_credits    INTEGER NOT NULL DEFAULT 0,
+    export_pay_exempt BOOLEAN NOT NULL DEFAULT false,
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
 
@@ -28,6 +31,23 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE INDEX IF NOT EXISTS idx_users_username ON users (username);
 CREATE INDEX IF NOT EXISTS idx_users_email    ON users (email);
+
+-- 导出付费充值订单（V免签）
+CREATE TABLE IF NOT EXISTS payment_orders (
+    id            VARCHAR(36)  PRIMARY KEY,
+    user_id       VARCHAR(36)  NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    pay_id        VARCHAR(64)  NOT NULL UNIQUE,
+    vmq_order_id  VARCHAR(64),
+    pay_type      INTEGER      NOT NULL DEFAULT 1,        -- 1=微信 2=支付宝
+    price         DOUBLE PRECISION NOT NULL DEFAULT 5.0,
+    really_price  DOUBLE PRECISION,
+    credits       INTEGER      NOT NULL DEFAULT 1,
+    status        VARCHAR(16)  NOT NULL DEFAULT 'pending',  -- pending / pending_review / paid / expired
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    paid_at       TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_payment_orders_user   ON payment_orders (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_payment_orders_status ON payment_orders (status);
 
 -- ============================================================
 -- 2. teaching_models — 教学模型/理论表
@@ -77,6 +97,9 @@ CREATE TABLE IF NOT EXISTS lesson_plans (
     source_content    TEXT,
     parsed_content    TEXT,
     final_content     JSONB        DEFAULT '{}',
+
+    -- 教材接地（ChinaTextbook）：教师所选"版本/册次/章节"紧凑串（仅元数据，不含 PDF/正文）
+    textbook_ref      VARCHAR(300),
 
     started_at        TIMESTAMPTZ,
     completed_at      TIMESTAMPTZ,
@@ -148,14 +171,14 @@ CREATE TABLE IF NOT EXISTS annotations (
 CREATE INDEX IF NOT EXISTS idx_annotations_lesson ON annotations (lesson_plan_id);
 
 -- ============================================================
--- 7. course_tool_results — 课程工具生成记录（大纲/PPT/习题/练习）
+-- 7. course_tool_results — 课程工具生成记录（大纲/PPT/习题/练习/知识漫画/英语卡片）
 --    支持异步队列：pending / running / completed / failed
 -- ============================================================
 CREATE TABLE IF NOT EXISTS course_tool_results (
     id             VARCHAR(36)  PRIMARY KEY DEFAULT uuid_generate_v4()::text,
     user_id        VARCHAR(36)  NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     lesson_id      VARCHAR(36)  REFERENCES lesson_plans(id) ON DELETE SET NULL,
-    tool_type      VARCHAR(20)  NOT NULL,                   -- outline / ppt / exercises / practice
+    tool_type      VARCHAR(20)  NOT NULL,                   -- outline / ppt / exercises / practice / comic / cards
     params         JSONB        DEFAULT '{}',
     result         JSONB        DEFAULT '{}',
     file_path      TEXT,

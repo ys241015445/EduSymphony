@@ -1,6 +1,8 @@
 -- Course-Tools Async Queue Migration
 -- Run once in Supabase SQL editor to enable pending/running/failed status for
--- outline / ppt / exercises / practice async jobs.
+-- outline / ppt / exercises / practice / comic / cards async jobs.
+-- 注：新增的 comic / cards 工具复用同一张表与队列，tool_type / queue kind 均为
+-- 无枚举约束的 varchar，无需额外 DDL；本迁移保持不变即可兼容。
 
 ALTER TABLE course_tool_results
     ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed',

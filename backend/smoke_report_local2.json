@@ -1,0 +1,44 @@
+{
+  "started_at": "2026-07-21T06:14:06.990090+00:00",
+  "base_url": "http://localhost:3002",
+  "frontend_url": "http://localhost:3000",
+  "dry_run": true,
+  "ui": false,
+  "summary": {
+    "pass": 1,
+    "fail": 2,
+    "skip": 0
+  },
+  "cases": [
+    {
+      "name": "material_html_local",
+      "method": "LOCAL",
+      "path": "-",
+      "status": "pass",
+      "http_status": null,
+      "detail": "",
+      "ms": 4.050300020026043,
+      "module": "material_local"
+    },
+    {
+      "name": "health",
+      "method": "GET",
+      "path": "/health",
+      "status": "fail",
+      "http_status": 502,
+      "detail": "status=502",
+      "ms": 144.73040000302717,
+      "module": "system"
+    },
+    {
+      "name": "auth_login",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "status": "fail",
+      "http_status": 502,
+      "detail": "",
+      "ms": 82.31169998180121,
+      "module": "auth"
+    }
+  ]
+}

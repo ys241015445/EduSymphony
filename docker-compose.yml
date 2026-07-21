@@ -2,12 +2,25 @@
 # 生产环境请使用 docker-compose.coolify.yml（单容器 + Nginx）
 # 注：Compose v2 已废弃顶层 `version` 字段，此处不再声明
 #
+# ┌──────────────────────────────────────────────────────────────────┐
+# │ 一键全栈启动（Windows，自动拉起 Docker Desktop + 构建 + 起全栈）：   │
+# │   powershell -ExecutionPolicy Bypass -File .\deploy.ps1            │
+# │ 或手动等价命令：                                                    │
+# │   docker compose up -d --build                                     │
+# │ 只起 V免签（继续用本机 uvicorn 后端）：                              │
+# │   docker compose up -d --build vmq-db vmq                          │
+# └──────────────────────────────────────────────────────────────────┘
+#
 # Use Docker Compose V2: `docker compose` (not legacy `docker-compose` binary).
 # Single-container image build (root Dockerfile) uses Dockerfile heredocs — requires BuildKit
 # (enabled by default on Docker Desktop; Linux: DOCKER_BUILDKIT=1).
 #
 # Secrets: copy `.env.example` at repo root to `.env` and fill DATABASE_URL / API keys.
+# VMQ_HTTP_PORT / VMQ_DB_ROOT_PASS / VMQ_DB_PASS 可在根 `.env` 覆盖（见 .env.example）。
 # Never commit `.env` or paste production passwords into docs or source defaults.
+#
+# backend 镜像构建时 apt 自动安装 LibreOffice（libreoffice-writer）+ 中文字体，
+# 并在 Dockerfile 内 `soffice --version` 校验；珠科教案 PDF 下载开箱即用。
 
 services:
   backend:
@@ -21,6 +34,14 @@ services:
     env_file:
       - .env
     environment:
+      # ─── 视觉/多模态模型（立体几何「上传题目图片解题」入口） ───
+      # 走 DashScope 兼容通道，复用 QWEN_API_KEY / QWEN_BASE_URL；.env 未配则用默认
+      QWEN_VL_MODEL:             ${QWEN_VL_MODEL:-qwen-vl-max}
+      # 文生图模型（英语卡片/知识漫画配图，走豆包方舟）。留空=关闭配图（纯文字）
+      DOUBAO_IMAGE_MODEL:        ${DOUBAO_IMAGE_MODEL:-}
+      # V免签（容器内用服务名访问；回调走容器内 backend:8000）
+      VMQ_BASE_URL:              http://vmq:80
+      VMQ_NOTIFY_BASE:           ${VMQ_NOTIFY_BASE:-http://backend:8000}
       # ─── ⚠️ DEPRECATED：方舟 PPT 智能体 / Coze Bot 已从 _do_ppt 移除 ───
       # PPT 生成已统一切换为「本地两阶段豆包深度生成 + python-pptx 渲染」，
       # 只依赖 DOUBAO_API_KEY + DOUBAO_MODEL（在 .env 文件里）即可。
@@ -34,13 +55,18 @@ services:
       COZE_PPT_TIMEOUT:          ${COZE_PPT_TIMEOUT:-300}
       COZE_POLL_INTERVAL:        ${COZE_POLL_INTERVAL:-2.0}
       # ─── Postgres-backed 持久化队列（支持重启恢复） ───
-      MAX_CONCURRENT_TASKS:      ${MAX_CONCURRENT_TASKS:-5}
-      MAX_PER_USER_TASKS:        ${MAX_PER_USER_TASKS:-3}
+      MAX_CONCURRENT_TASKS:      ${MAX_CONCURRENT_TASKS:-6}
+      MAX_PER_USER_TASKS:        ${MAX_PER_USER_TASKS:-4}
       TASK_TIMEOUT_SEC:          ${TASK_TIMEOUT_SEC:-1200}
+      LESSON_TASK_TIMEOUT_SEC:   ${LESSON_TASK_TIMEOUT_SEC:-3600}
+      TOOL_TASK_TIMEOUT_SEC:     ${TOOL_TASK_TIMEOUT_SEC:-600}
       WORKER_LEASE_SEC:          ${WORKER_LEASE_SEC:-1800}
-      QUEUE_POLL_INTERVAL_MS:    ${QUEUE_POLL_INTERVAL_MS:-1000}
+      QUEUE_POLL_INTERVAL_MS:    ${QUEUE_POLL_INTERVAL_MS:-800}
       QUEUE_SWEEP_INTERVAL_SEC:  ${QUEUE_SWEEP_INTERVAL_SEC:-30}
       QUEUE_GC_DAYS:             ${QUEUE_GC_DAYS:-7}
+      # 连接池与 6 worker 配套（显式放开，避免 pooled 自动上限 10）
+      DB_POOL_SIZE:              ${DB_POOL_SIZE:-16}
+      DB_MAX_OVERFLOW:           ${DB_MAX_OVERFLOW:-6}
     volumes:
       - ./backend/database:/app/database
     restart: unless-stopped
@@ -64,3 +90,46 @@ services:
       backend:
         condition: service_healthy
     restart: unless-stopped
+
+  # V免签数据库（独立 MySQL，与 Supabase 隔离）
+  vmq-db:
+    image: mysql:5.7
+    environment:
+      MYSQL_ROOT_PASSWORD: ${VMQ_DB_ROOT_PASS:-vmqroot123}
+      MYSQL_DATABASE: vmq
+      MYSQL_USER: vmq
+      MYSQL_PASSWORD: ${VMQ_DB_PASS:-vmqpass123}
+    volumes:
+      - vmq_db_data:/var/lib/mysql
+      # 首次启动自动导入建表 + 预置的 setting（后台账号 lzf、密钥、两张收款码）
+      - ./vmq/vmq.sql:/docker-entrypoint-initdb.d/vmq.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${VMQ_DB_ROOT_PASS:-vmqroot123}"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  # V免签（个人收款监控，xsidc/Vmqphp）—— 导出付费闸门用。
+  # 后台 http://localhost:8080 ，账号 lzf / lzf122406!（已预置）。
+  # 手机装 V免签监控端 App 指向本服务；后端 .env 已设 VMQ_BASE_URL=http://vmq:80、VMQ_KEY。
+  vmq:
+    build: ./vmq
+    depends_on:
+      vmq-db:
+        condition: service_healthy
+    expose:
+      - "80"
+    ports:
+      - "${VMQ_HTTP_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost/"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+
+volumes:
+  vmq_db_data:

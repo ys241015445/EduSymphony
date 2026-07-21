@@ -5,10 +5,10 @@ import { useT } from '../i18n/translations'
 import Header from '../components/layout/Header'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
-import { Plus, FileText, Clock, CheckCircle2, AlertCircle, Loader2, Trash2, Zap, BookOpen, Wrench, GraduationCap, FileEdit, Library, Zap as ZapIcon, Hourglass, Files, LayoutGrid, Layers, X } from 'lucide-react'
+import { Plus, FileText, Clock, CheckCircle2, AlertCircle, Loader2, Trash2, Zap, BookOpen, Wrench, GraduationCap, FileEdit, Library, Zap as ZapIcon, Hourglass, Files, LayoutGrid, Layers, X, CalendarRange } from 'lucide-react'
 import { useJobsStore } from '../stores/jobsStore'
 import { useAuthStore } from '../stores/authStore'
-import { canUseCourseTools, parseAccessLevel } from '../lib/access'
+import { canUseCourseTools, parseAccessLevel, hasCapability } from '../lib/access'
 
 /** Uniform height for dashboard toolbar buttons (primary + secondary). */
 const DASH_BTN =
@@ -58,7 +58,6 @@ function seriesStatusLabelKey(status: string): string {
 
 function LessonCard({ lesson, scope }: { lesson: LessonSummary; scope?: LessonsScope }) {
   const t = useT()
-  const { deleteLesson, fetchLessons } = useLessonStore()
   const navigate = useNavigate()
   const displayStatus = deriveDisplayStatus(lesson)
   const cfg = statusConfig[displayStatus] || statusConfig.draft
@@ -85,8 +84,9 @@ function LessonCard({ lesson, scope }: { lesson: LessonSummary; scope?: LessonsS
   const handleDelete = async (e: React.MouseEvent) => {
     e.stopPropagation()
     if (window.confirm(t('dashboard.confirm_delete'))) {
-      await deleteLesson(lesson.id, scope)
-      fetchLessons(scope)
+      const store = useLessonStore.getState()
+      await store.deleteLesson(lesson.id, scope)
+      store.fetchLessons(scope)
     }
   }
 
@@ -214,21 +214,28 @@ export default function Dashboard() {
   }
 
   const user = useAuthStore((s) => s.user)
-  const showCourseTools = canUseCourseTools(parseAccessLevel(user?.access_level))
-  const { lessons, seriesList, loading, loadingSeries, fetchLessons, fetchSeries } = useLessonStore()
-  const jobs = useJobsStore((s) => s.items)
-  const bindSocket = useJobsStore((s) => s.bindSocket)
-  const refreshJobs = useJobsStore((s) => s.refreshFromServer)
+  const showCourseTools = canUseCourseTools(parseAccessLevel(user?.access_level)) && hasCapability(user as any, 'can_course_tools')
+  const showTemplateFill = canUseCourseTools(parseAccessLevel(user?.access_level)) && hasCapability(user as any, 'can_template_fill')
+  const showSeries = hasCapability(user as any, 'can_series')
+  const showUniversity = hasCapability(user as any, 'can_university')
+  const showSemesterHelper = hasCapability(user as any, 'can_semester_helper')
+  // 用原子 selector 单独订阅；store actions 不入 useEffect deps，避免触发循环
+  const lessons       = useLessonStore((s) => s.lessons)
+  const seriesList    = useLessonStore((s) => s.seriesList)
+  const loading       = useLessonStore((s) => s.loading)
+  const loadingSeries = useLessonStore((s) => s.loadingSeries)
+  const jobs          = useJobsStore((s) => s.items)
 
   const [tab, setTab] = useState<DashboardTab>('all')
 
   useEffect(() => {
     const scope = forUserId ? { for_user_id: forUserId } : undefined
-    fetchLessons(scope)
-    fetchSeries(scope)
-    bindSocket()
-    refreshJobs()
-  }, [fetchLessons, fetchSeries, bindSocket, refreshJobs, forUserId])
+    useLessonStore.getState().fetchLessons(scope)
+    useLessonStore.getState().fetchSeries(scope)
+    useJobsStore.getState().bindSocket()
+    useJobsStore.getState().refreshFromServer()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [forUserId])
 
   const activeJobs = jobs.filter((j) => j.status === 'queued' || j.status === 'running')
 
@@ -295,18 +302,22 @@ export default function Dashboard() {
                 {t('dashboard.quick')}
               </Button>
             </Link>
-            <Link to={`/series/new${scopeQs}`} className={DASH_LINK}>
-              <Button variant="secondary" size="sm" className={`${DASH_BTN} !border-violet-300 !text-violet-700 !bg-violet-50 hover:!bg-violet-100`}>
-                <BookOpen className="w-4 h-4 shrink-0" />
-                {t('dashboard.series')}
-              </Button>
-            </Link>
-            <Link to={`/university/new${scopeQs}`} className={DASH_LINK}>
-              <Button variant="secondary" size="sm" className={`${DASH_BTN} !border-indigo-300 !text-indigo-700 !bg-indigo-50 hover:!bg-indigo-100`}>
-                <GraduationCap className="w-4 h-4 shrink-0" />
-                {t('dashboard.university')}
-              </Button>
-            </Link>
+            {showSeries && (
+              <Link to={`/series/new${scopeQs}`} className={DASH_LINK}>
+                <Button variant="secondary" size="sm" className={`${DASH_BTN} !border-violet-300 !text-violet-700 !bg-violet-50 hover:!bg-violet-100`}>
+                  <BookOpen className="w-4 h-4 shrink-0" />
+                  {t('dashboard.series')}
+                </Button>
+              </Link>
+            )}
+            {showUniversity && (
+              <Link to={`/university/new${scopeQs}`} className={DASH_LINK}>
+                <Button variant="secondary" size="sm" className={`${DASH_BTN} !border-indigo-300 !text-indigo-700 !bg-indigo-50 hover:!bg-indigo-100`}>
+                  <GraduationCap className="w-4 h-4 shrink-0" />
+                  {t('dashboard.university')}
+                </Button>
+              </Link>
+            )}
             {showCourseTools && (
               <>
                 <Link to={`/course-tools${scopeQs}`} className={DASH_LINK}>
@@ -329,11 +340,19 @@ export default function Dashboard() {
                 {t('dashboard.documents')}
               </Button>
             </Link>
-            {showCourseTools && (
+            {showTemplateFill && (
               <Link to={`/template-fill${scopeQs}`} className={DASH_LINK}>
                 <Button variant="secondary" size="sm" className={`${DASH_BTN} !border-emerald-300 !text-emerald-700 !bg-emerald-50 hover:!bg-emerald-100`}>
                   <FileEdit className="w-4 h-4 shrink-0" />
                   {t('dashboard.template_fill')}
+                </Button>
+              </Link>
+            )}
+            {showSemesterHelper && (
+              <Link to={`/semester-helper${scopeQs}`} className={DASH_LINK}>
+                <Button variant="secondary" size="sm" className={`${DASH_BTN} !border-amber-300 !text-amber-700 !bg-amber-50 hover:!bg-amber-100`}>
+                  <CalendarRange className="w-4 h-4 shrink-0" />
+                  {t('dashboard.semester_helper')}
                 </Button>
               </Link>
             )}
@@ -415,18 +434,22 @@ export default function Dashboard() {
                   {t('dashboard.quick')}
                 </Button>
               </Link>
-              <Link to={`/series/new${scopeQs}`} className={DASH_LINK}>
-                <Button variant="secondary" size="sm" className={`${DASH_BTN} !border-violet-300 !text-violet-700 !bg-violet-50 hover:!bg-violet-100`}>
-                  <BookOpen className="w-4 h-4 shrink-0" />
-                  {t('dashboard.series')}
-                </Button>
-              </Link>
-              <Link to={`/university/new${scopeQs}`} className={DASH_LINK}>
-                <Button variant="secondary" size="sm" className={`${DASH_BTN} !border-indigo-300 !text-indigo-700 !bg-indigo-50 hover:!bg-indigo-100`}>
-                  <GraduationCap className="w-4 h-4 shrink-0" />
-                  {t('dashboard.university')}
-                </Button>
-              </Link>
+              {showSeries && (
+                <Link to={`/series/new${scopeQs}`} className={DASH_LINK}>
+                  <Button variant="secondary" size="sm" className={`${DASH_BTN} !border-violet-300 !text-violet-700 !bg-violet-50 hover:!bg-violet-100`}>
+                    <BookOpen className="w-4 h-4 shrink-0" />
+                    {t('dashboard.series')}
+                  </Button>
+                </Link>
+              )}
+              {showUniversity && (
+                <Link to={`/university/new${scopeQs}`} className={DASH_LINK}>
+                  <Button variant="secondary" size="sm" className={`${DASH_BTN} !border-indigo-300 !text-indigo-700 !bg-indigo-50 hover:!bg-indigo-100`}>
+                    <GraduationCap className="w-4 h-4 shrink-0" />
+                    {t('dashboard.university')}
+                  </Button>
+                </Link>
+              )}
               {showCourseTools && (
                 <>
                   <Link to={`/course-tools${scopeQs}`} className={DASH_LINK}>
@@ -449,11 +472,19 @@ export default function Dashboard() {
                   {t('dashboard.documents')}
                 </Button>
               </Link>
-              {showCourseTools && (
+              {showTemplateFill && (
                 <Link to={`/template-fill${scopeQs}`} className={DASH_LINK}>
                   <Button variant="secondary" size="sm" className={`${DASH_BTN} !border-emerald-300 !text-emerald-700 !bg-emerald-50 hover:!bg-emerald-100`}>
                     <FileEdit className="w-4 h-4 shrink-0" />
                     {t('dashboard.template_fill')}
+                  </Button>
+                </Link>
+              )}
+              {showSemesterHelper && (
+                <Link to={`/semester-helper${scopeQs}`} className={DASH_LINK}>
+                  <Button variant="secondary" size="sm" className={`${DASH_BTN} !border-amber-300 !text-amber-700 !bg-amber-50 hover:!bg-amber-100`}>
+                    <CalendarRange className="w-4 h-4 shrink-0" />
+                    {t('dashboard.semester_helper')}
                   </Button>
                 </Link>
               )}

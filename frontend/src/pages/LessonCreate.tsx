@@ -1,5 +1,6 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
+import { api } from '../services/api'
 import { useLessonStore, LessonsScope } from '../stores/lessonStore'
 import { useLanguageStore } from '../stores/languageStore'
 import { useT } from '../i18n/translations'
@@ -100,7 +101,7 @@ export default function LessonCreate() {
   )
   const scopeQs = forUserId ? `?for_user_id=${encodeURIComponent(forUserId)}` : ''
   const t = useT()
-  const { createLesson } = useLessonStore()
+  const createLesson = useLessonStore((s) => s.createLesson)
 
   const [title, setTitle] = useState('')
   const [subject, setSubject] = useState('')
@@ -119,6 +120,44 @@ export default function LessonCreate() {
   const [showCustomInput, setShowCustomInput] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+
+  // 教材接地（ChinaTextbook）：级联选择（选填）
+  const [tbLevels, setTbLevels] = useState<string[]>([])
+  const [tbSubjects, setTbSubjects] = useState<string[]>([])
+  const [tbPublishers, setTbPublishers] = useState<string[]>([])
+  const [tbBooks, setTbBooks] = useState<{ grade: string; title: string; url: string }[]>([])
+  const [tbLevel, setTbLevel] = useState('')
+  const [tbSubject, setTbSubject] = useState('')
+  const [tbPublisher, setTbPublisher] = useState('')
+  const [tbBookUrl, setTbBookUrl] = useState('')
+  const [tbChapter, setTbChapter] = useState('')
+
+  useEffect(() => {
+    api.get('/api/v1/textbooks/catalog')
+      .then(r => setTbLevels(r.data?.levels || []))
+      .catch(() => {})
+  }, [])
+  useEffect(() => {
+    setTbSubject(''); setTbPublisher(''); setTbBookUrl('')
+    setTbSubjects([]); setTbPublishers([]); setTbBooks([])
+    if (!tbLevel) return
+    api.get(`/api/v1/textbooks/catalog?level=${encodeURIComponent(tbLevel)}`)
+      .then(r => setTbSubjects(r.data?.subjects || [])).catch(() => {})
+  }, [tbLevel])
+  useEffect(() => {
+    setTbPublisher(''); setTbBookUrl(''); setTbPublishers([]); setTbBooks([])
+    if (!tbLevel || !tbSubject) return
+    api.get(`/api/v1/textbooks/catalog?level=${encodeURIComponent(tbLevel)}&subject=${encodeURIComponent(tbSubject)}`)
+      .then(r => setTbPublishers(r.data?.publishers || [])).catch(() => {})
+  }, [tbSubject])
+  useEffect(() => {
+    setTbBookUrl(''); setTbBooks([])
+    if (!tbLevel || !tbSubject || !tbPublisher) return
+    api.get(`/api/v1/textbooks/catalog?level=${encodeURIComponent(tbLevel)}&subject=${encodeURIComponent(tbSubject)}&publisher=${encodeURIComponent(tbPublisher)}`)
+      .then(r => setTbBooks(r.data?.books || [])).catch(() => {})
+  }, [tbPublisher])
+
+  const tbSelectedBook = tbBooks.find(b => b.url === tbBookUrl) || null
 
   const effectiveTheory = showCustomInput ? customTheory : preferredTheory
 
@@ -164,6 +203,10 @@ export default function LessonCreate() {
       form.append('generation_mode', generationMode)
       form.append('locale', useLanguageStore.getState().locale)
       if (effectiveTheory) form.append('preferred_theory', effectiveTheory)
+      if (tbSelectedBook) {
+        const ref = [tbPublisher, tbSelectedBook.title, tbChapter.trim()].filter(Boolean).join('·')
+        if (ref) form.append('textbook_ref', ref)
+      }
       if (sourceType === 'manual') {
         form.append('source_content', sourceContent)
       } else if (file) {
@@ -223,6 +266,48 @@ export default function LessonCreate() {
                 </select>
               </div>
             </div>
+          </Card>
+
+          <Card>
+            <h2 className="font-semibold text-gray-900 mb-1">{t('create.textbook_label')}</h2>
+            <p className="text-xs text-gray-500 mb-4">{t('create.textbook_desc')}</p>
+            <div className="grid sm:grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-gray-700">{t('create.textbook_level')}</label>
+                <select value={tbLevel} onChange={(e) => setTbLevel(e.target.value)} className={selectClasses}>
+                  <option value="">{t('create.textbook_optional')}</option>
+                  {tbLevels.map(v => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-gray-700">{t('create.textbook_subject')}</label>
+                <select value={tbSubject} onChange={(e) => setTbSubject(e.target.value)} className={selectClasses} disabled={!tbSubjects.length}>
+                  <option value="">{t('create.textbook_select')}</option>
+                  {tbSubjects.map(v => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-gray-700">{t('create.textbook_publisher')}</label>
+                <select value={tbPublisher} onChange={(e) => setTbPublisher(e.target.value)} className={selectClasses} disabled={!tbPublishers.length}>
+                  <option value="">{t('create.textbook_select')}</option>
+                  {tbPublishers.map(v => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-gray-700">{t('create.textbook_book')}</label>
+                <select value={tbBookUrl} onChange={(e) => setTbBookUrl(e.target.value)} className={selectClasses} disabled={!tbBooks.length}>
+                  <option value="">{t('create.textbook_select')}</option>
+                  {tbBooks.map(b => <option key={b.url} value={b.url}>{b.title}</option>)}
+                </select>
+              </div>
+              <Input label={t('create.textbook_chapter')} placeholder={t('create.textbook_chapter_ph')} value={tbChapter} onChange={(e) => setTbChapter(e.target.value)} />
+            </div>
+            {tbSelectedBook && (
+              <a href={tbSelectedBook.url} target="_blank" rel="noopener noreferrer"
+                 className="inline-flex items-center gap-1.5 mt-3 text-xs font-medium text-brand-600 hover:text-brand-700">
+                <BookOpen className="w-3.5 h-3.5" />{t('create.textbook_view_source')}
+              </a>
+            )}
           </Card>
 
           <Card>

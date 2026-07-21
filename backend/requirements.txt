@@ -1,5 +1,22 @@
 # Python 3.11+ recommended. Install: pip install -r requirements.txt
 # (optional: use conda; configure a domestic PyPI mirror if needed)
+#
+# ── System dependencies (not installable via pip) ──────────────────────────
+# 珠科教案助手 docx → pdf 高保真转换依赖 LibreOffice headless (soffice)。
+# Docker 用户：`docker compose build` 时 backend/Dockerfile（或根 Dockerfile）会通过
+# apt 自动安装 libreoffice-writer + 中文字体，并在构建期执行 `soffice --version` 校验；
+# 无需手动安装。部署后可 `curl /health` 查看 libreoffice 字段是否为 true。
+# 本地裸跑请按平台安装 soffice，装完无需重启后端：
+#   Windows (winget，推荐):
+#     winget install --id TheDocumentFoundation.LibreOffice --accept-package-agreements --accept-source-agreements
+#   Windows (手动):
+#     https://www.libreoffice.org/download/  → 默认装到 C:\Program Files\LibreOffice\
+#   macOS:
+#     brew install --cask libreoffice
+#   Linux (Debian/Ubuntu):
+#     sudo apt install libreoffice-writer fonts-wqy-zenhei fonts-noto-cjk
+# 可选：非默认路径时设置环境变量 SOFFICE_PATH 指向 soffice 可执行文件。
+# 未安装时 GET /zhuke/{id}/download?format=pdf 返回 503；docx 下载不受影响。
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
 python-multipart==0.0.6
@@ -28,6 +45,9 @@ html2text==2020.1.16
 xhtml2pdf==0.2.17
 
 opencc-python-reimplemented==0.1.7
+
+# 立体几何教学材料（edu-solid-geometry skill 移植）确定性精确计算核心依赖
+sympy==1.12
 
 pydantic==2.5.3
 pydantic-settings==2.1.0

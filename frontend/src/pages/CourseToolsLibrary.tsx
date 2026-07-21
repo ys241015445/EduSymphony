@@ -21,9 +21,11 @@ import {
   Eye,
   Layers,
   X,
+  Image,
+  Layers as LayersIcon,
 } from 'lucide-react'
 
-type ToolType = 'outline' | 'ppt' | 'exercises' | 'practice'
+type ToolType = 'outline' | 'ppt' | 'exercises' | 'practice' | 'comic' | 'cards'
 type Tab = 'all' | ToolType | 'pending'
 
 interface LibItem {
@@ -42,6 +44,8 @@ const TOOL_META: Record<ToolType, { icon: typeof FileText; color: string; labelK
   ppt: { icon: Presentation, color: 'text-purple-600 bg-purple-50 border-purple-200', labelKey: 'tools.tab_ppt' },
   exercises: { icon: ClipboardList, color: 'text-green-600 bg-green-50 border-green-200', labelKey: 'tools.tab_exercises' },
   practice: { icon: Dumbbell, color: 'text-orange-600 bg-orange-50 border-orange-200', labelKey: 'tools.tab_practice' },
+  comic: { icon: Image, color: 'text-pink-600 bg-pink-50 border-pink-200', labelKey: 'tools.tab_comic' },
+  cards: { icon: LayersIcon, color: 'text-cyan-600 bg-cyan-50 border-cyan-200', labelKey: 'tools.tab_cards' },
 }
 
 export default function CourseToolsLibrary() {
@@ -124,7 +128,7 @@ export default function CourseToolsLibrary() {
   const counts = useMemo(() => {
     const out: Record<ToolType | 'all' | 'pending', number> = {
       all: items.length,
-      outline: 0, ppt: 0, exercises: 0, practice: 0,
+      outline: 0, ppt: 0, exercises: 0, practice: 0, comic: 0, cards: 0,
       pending: 0,
     }
     for (const i of items) {

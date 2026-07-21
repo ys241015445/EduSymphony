@@ -34,6 +34,22 @@ export interface SeriesSummary {
   created_at?: string | null
 }
 
+/** GET /api/v1/lessons/{id}/status — lightweight poll payload */
+export interface LessonStatus {
+  id: string
+  status: string
+  progress: number
+  current_stage: number
+  current_phase?: string
+  error_message?: string
+  material_draft_status?: string
+  material_optimized_status?: string
+  styled_pdf_status?: string
+  has_full_draft: boolean
+  has_full_optimized: boolean
+  has_stages: boolean
+}
+
 export interface LessonDetail {
   id: string
   user_id: string
@@ -83,6 +99,7 @@ interface LessonState {
   fetchLessons: (scope?: LessonsScope) => Promise<void>
   fetchSeries: (scope?: LessonsScope) => Promise<void>
   fetchLesson: (id: string, scope?: LessonsScope) => Promise<void>
+  fetchLessonStatus: (id: string, scope?: LessonsScope) => Promise<LessonStatus>
   fetchDiscussions: (id: string, scope?: LessonsScope) => Promise<void>
   createLesson: (form: FormData, scope?: LessonsScope) => Promise<string>
   deleteLesson: (id: string, scope?: LessonsScope) => Promise<void>
@@ -123,6 +140,29 @@ export const useLessonStore = create<LessonState>()((set) => ({
   fetchLesson: async (id, scope) => {
     const res = await api.get(`/api/v1/lessons/${id}`, { params: scopeParams(scope) })
     set({ currentLesson: res.data })
+  },
+
+  fetchLessonStatus: async (id, scope) => {
+    const res = await api.get(`/api/v1/lessons/${id}/status`, { params: scopeParams(scope) })
+    const st = res.data as LessonStatus
+    set((s) => {
+      if (!s.currentLesson || s.currentLesson.id !== id) return s
+      const fc = { ...(s.currentLesson.final_content || {}) }
+      if (st.material_draft_status != null) fc.material_draft_status = st.material_draft_status
+      if (st.material_optimized_status != null) fc.material_optimized_status = st.material_optimized_status
+      if (st.styled_pdf_status != null) fc.styled_pdf_status = st.styled_pdf_status
+      return {
+        currentLesson: {
+          ...s.currentLesson,
+          status: st.status,
+          progress: st.progress,
+          current_stage: st.current_stage,
+          error_message: st.error_message,
+          final_content: fc,
+        },
+      }
+    })
+    return st
   },
 
   fetchDiscussions: async (id, scope) => {

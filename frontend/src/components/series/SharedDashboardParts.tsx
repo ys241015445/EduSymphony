@@ -229,6 +229,7 @@ export function GenerationStatusCard({
 export function MyDocsQuickAccessCard({
   seriesId, completed, forUserId, t,
 }: { seriesId: string; completed: number; forUserId?: string; t: (k: string) => string }) {
+  const docsDisabled = completed === 0
   const docsQs = (() => {
     const p = new URLSearchParams({ series: seriesId })
     if (forUserId) p.set('for_user_id', forUserId)
@@ -253,13 +254,25 @@ export function MyDocsQuickAccessCard({
             {t('university.my_docs_quick_desc').replace('{n}', String(completed))}
           </p>
           <div className="flex flex-wrap gap-2">
-            <Link
-              to={`/documents${docsQs}`}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-600 text-white text-sm hover:bg-brand-700 transition-colors"
-            >
-              <FileText className="w-4 h-4" />
-              {t('university.my_docs_quick_go_docs')}
-            </Link>
+            {docsDisabled ? (
+              <button
+                type="button"
+                disabled
+                title={t('university.my_docs_quick_disabled')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-200 text-gray-500 text-sm cursor-not-allowed"
+              >
+                <FileText className="w-4 h-4" />
+                {t('university.my_docs_quick_go_docs')}
+              </button>
+            ) : (
+              <Link
+                to={`/documents${docsQs}`}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-600 text-white text-sm hover:bg-brand-700 transition-colors"
+              >
+                <FileText className="w-4 h-4" />
+                {t('university.my_docs_quick_go_docs')}
+              </Link>
+            )}
             <Link
               to={`/documents${exportsQs}`}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 text-gray-700 text-sm hover:bg-gray-50 transition-colors"

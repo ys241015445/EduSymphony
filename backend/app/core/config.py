@@ -2,6 +2,15 @@ from pydantic_settings import BaseSettings
 from typing import List
 import os
 
+# 把 backend/.env 载入进程环境，使 queue_manager / database 里的 os.getenv
+# （MAX_CONCURRENT_TASKS / MAX_PER_USER_TASKS / QUEUE_POLL_INTERVAL_MS / DB_POOL_SIZE 等）
+# 在本地 uvicorn 下也能读到 .env 的值（docker 走 env_file，不受影响；不覆盖已存在的环境变量）。
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=False)
+except Exception:
+    pass
+
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "database")
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(os.path.join(DATA_DIR, "files"), exist_ok=True)
@@ -29,14 +38,23 @@ class Settings(BaseSettings):
     QWEN_API_KEY: str = ""
     QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     QWEN_MODEL: str = "qwen-plus"
+    # 视觉/多模态模型（立体几何图片入口用），走同一 DashScope 兼容通道
+    QWEN_VL_MODEL: str = "qwen-vl-max"
 
     KIMI_API_KEY: str = ""
     KIMI_BASE_URL: str = "https://api.moonshot.cn/v1"
     KIMI_MODEL: str = "kimi-k2-0905-preview"
+    KIMI_K2_MODEL: str = ""
+    KIMI_K2_CONCURRENCY: int = 4
+    KIMI_K2_TIMEOUT_SEC: int = 120
+    ZHUKE_LAYOUT_REVIEW_ON_LINT: bool = False
 
     DOUBAO_API_KEY: str = ""
     DOUBAO_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_MODEL: str = "doubao-seed-1-6-251015"
+    # 文生图模型（英语卡片 / 知识漫画配图用），走豆包方舟 /images/generations。
+    # 留空 = 关闭配图（纯文字）；填 Seedream 接入点 id（如 doubao-seedream-3-0-t2i-...）开启。
+    DOUBAO_IMAGE_MODEL: str = ""
     # Optional: Volcengine Ark Bot (智能体) ID for real PPT generation.
     # Leave empty to fall back to Chat-based PPT generation.
     DOUBAO_PPT_BOT_ID: str = ""
@@ -69,12 +87,42 @@ class Settings(BaseSettings):
 
     LOG_LEVEL: str = "INFO"
 
+    # ── 导出/下载付费闸门（V免签） ──────────────────────────────
+    # V免签 PHP 服务端（内网可达）根地址，如 http://vmq:8080
+    VMQ_BASE_URL: str = ""
+    # V免签「通讯密钥」，与其后台一致（用于下单/回调签名）
+    VMQ_KEY: str = ""
+    # 我方公网可达的回调根地址（V免签异步通知会打到 {VMQ_NOTIFY_BASE}/api/v1/payments/vmq-notify）
+    VMQ_NOTIFY_BASE: str = ""
+    # 单次充值价格（元）与每次充值发放的导出额度次数
+    EXPORT_PRICE: float = 5.0
+    EXPORT_CREDITS_PER_ORDER: int = 1
+    # 订单轮询超时（秒），仅前端提示用
+    EXPORT_ORDER_TIMEOUT_SEC: int = 300
+
+    # ── 第二种支付确认方式（扫静态码 + 我已支付 → 临时额度 + 邮件通知人工补额）──
+    # 用户点「我已支付」立即发放的临时导出额度次数
+    EXPORT_TEMP_CREDITS: int = 1
+    # 展示的收款码内容（二维码原文；前端用 qrcode 渲染）。默认填已解码的 sail(**帆) 收款码
+    ALIPAY_QR: str = "https://qr.alipay.com/fkx14723kqwabzjzlu9g7ed"
+    WECHAT_QR: str = "wxp://f2f0iB1xnuc5xtF6HPyy2td-Ss_MtflrVLkGF4x1Lbd9yaR-NHL4znMWrANgjuM_0EWS"
+    # 收款通知邮件（充值提醒发到这里，正文备注哪个用户充了）
+    ADMIN_PAYMENT_EMAIL: str = "778636011@qq.com"
+    # SMTP（QQ 邮箱：smtp.qq.com:465 SSL，SMTP_PASS 填「授权码」而非登录密码）
+    SMTP_HOST: str = "smtp.qq.com"
+    SMTP_PORT: int = 465
+    SMTP_USER: str = ""
+    SMTP_PASS: str = ""
+
     # Optional absolute path to a TTF/TTC for PDF export (ReportLab / xhtml2pdf). Env: PDF_CJK_FONT_PATH
     PDF_CJK_FONT_PATH: str = ""
 
     class Config:
         env_file = ".env"
         case_sensitive = True
+        # 忽略 .env 里非 Settings 字段的键（如队列/连接池的 os.getenv 变量），
+        # 否则 pydantic 会因 extra=forbid 直接报错拒绝启动。
+        extra = "ignore"
 
 
 settings = Settings()

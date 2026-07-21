@@ -6,6 +6,25 @@ import { getSocket, joinLesson, leaveLesson } from '../services/socket'
 import { useT } from '../i18n/translations'
 import { useLanguageStore } from '../stores/languageStore'
 import { api } from '../services/api'
+import { ensureExportAllowed, consumeExportCredit, refreshCreditsSoon } from '../lib/exportGate'
+import { usePaymentStore } from '../stores/paymentStore'
+
+// Best-effort: tell the server that a client-side blob download happened, so the
+// click shows up in /documents export history and in admin /admin/users/:uid/exports.
+async function logClientDownload(payload: {
+  lesson_plan_id?: string | null
+  source_kind: string
+  format: string
+  file_name: string
+  file_size?: number
+  params?: Record<string, any>
+}) {
+  try {
+    await api.post('/api/v1/documents/exports/log-client', payload)
+  } catch {
+    /* never block the download itself */
+  }
+}
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
 import AgentCard from '../components/lesson/AgentCard'
@@ -16,7 +35,7 @@ import { ArrowLeft, FileText, Loader2, CheckCircle2, Clock, RefreshCw, Download,
 import StyledPdfModal from '../components/lesson/StyledPdfModal'
 import { useMaterialGenStore } from '../stores/materialGenStore'
 import { sanitizePreviewHtml } from '../utils/sanitizePreviewHtml'
-import { canUseCourseTools, parseAccessLevel } from '../lib/access'
+import { canUseCourseTools, parseAccessLevel, isAdmin } from '../lib/access'
 
 interface ActiveModel {
   key: string
@@ -63,7 +82,30 @@ export default function LessonProcess() {
   const T = useT()
   const user = useAuthStore((s) => s.user)
   const showCourseTools = canUseCourseTools(parseAccessLevel(user?.access_level))
-  const { currentLesson, fetchLesson, fetchDiscussions, discussions, extendQuickLesson } = useLessonStore()
+  // Atomic selectors for reactive data; actions taken via useLessonStore.getState()
+  // in useMemo wrappers so call sites stay unchanged and useEffect deps don't
+  // include store action references (which previously caused re-render loops).
+  const currentLesson = useLessonStore((s) => s.currentLesson)
+  const discussions = useLessonStore((s) => s.discussions)
+  const extendQuickLesson = useLessonStore((s) => s.extendQuickLesson)
+  const fetchLesson = useMemo(
+    () => (id: string, scope?: LessonsScope) => useLessonStore.getState().fetchLesson(id, scope),
+    [],
+  )
+  const fetchLessonStatus = useMemo(
+    () => (id: string, scope?: LessonsScope) => useLessonStore.getState().fetchLessonStatus(id, scope),
+    [],
+  )
+  const fetchDiscussions = useMemo(
+    () => (id: string, scope?: LessonsScope) => useLessonStore.getState().fetchDiscussions(id, scope),
+    [],
+  )
+  const pollSnapshotRef = useRef({
+    status: '',
+    material_draft_status: '',
+    material_optimized_status: '',
+    styled_pdf_status: '',
+  })
 
   const [sections, setSections] = useState<Section[]>([])
   const [activeSection, setActiveSection] = useState<string | null>(null)
@@ -81,7 +123,7 @@ export default function LessonProcess() {
   const [streamingContent, setStreamingContent] = useState<Record<number, { text: string; done: boolean }>>({})
 
   // Full document states
-  const [activeVersion, setActiveVersion] = useState<'draft' | 'optimized' | 'materials'>('draft')
+  const [activeVersion, setActiveVersion] = useState<'draft' | 'optimized' | 'materials' | 'analysis'>('draft')
   const [fullDraftText, setFullDraftText] = useState('')
   const [fullDraftStreaming, setFullDraftStreaming] = useState(false)
   const [fullOptimizedText, setFullOptimizedText] = useState('')
@@ -111,6 +153,53 @@ export default function LessonProcess() {
   const [previewingMaterial, setPreviewingMaterial] = useState<{ html: string; title: string; version: string } | null>(null)
   const startMaterialGen = useMaterialGenStore((s) => s.startGeneration)
 
+  // 立体几何图片入口：上传题目图 → 识别 spec → 确认 → 精确生成交互3D材料
+  const geoFileRef = useRef<HTMLInputElement>(null)
+  const [geoBusy, setGeoBusy] = useState<'recognizing' | 'generating' | null>(null)
+  const [geoRecognized, setGeoRecognized] = useState<{ spec: any; title: string } | null>(null)
+  const [geoError, setGeoError] = useState('')
+
+  const onGeoImagePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (e.target) e.target.value = ''
+    if (!file) return
+    setGeoError('')
+    setGeoRecognized(null)
+    setGeoBusy('recognizing')
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const res = await api.post('/api/v1/export/geometry/recognize-image', fd)
+      if (res.data?.ok) {
+        setGeoRecognized({ spec: res.data.spec, title: res.data.title || '' })
+      } else {
+        setGeoError(res.data?.reason || T('process.geo_unsupported'))
+      }
+    } catch (err: any) {
+      setGeoError(err?.response?.data?.detail || T('process.geo_unsupported'))
+    } finally {
+      setGeoBusy(null)
+    }
+  }
+
+  const confirmGeoGenerate = async (version: 'draft' | 'optimized') => {
+    if (!geoRecognized || !id) return
+    setGeoBusy('generating')
+    setGeoError('')
+    try {
+      const fd = new FormData()
+      fd.append('spec', JSON.stringify(geoRecognized.spec))
+      fd.append('content_version', version)
+      await api.post(`/api/v1/export/material/generate-from-spec/${id}${scopeQs}`, fd)
+      setGeoRecognized(null)
+      fetchLesson(id, lessonScope)
+    } catch (err: any) {
+      setGeoError(err?.response?.data?.detail || T('process.geo_gen_failed'))
+    } finally {
+      setGeoBusy(null)
+    }
+  }
+
   useEffect(() => {
     if (!id) return
     setFullDraftText('')
@@ -126,9 +215,11 @@ export default function LessonProcess() {
     setActiveVersion('draft')
     setModelRecText('')
     setModelRecStreaming(false)
-    fetchLesson(id, lessonScope)
-    fetchDiscussions(id, lessonScope)
-  }, [id, forUserId, fetchLesson, fetchDiscussions])
+    const store = useLessonStore.getState()
+    store.fetchLesson(id, lessonScope)
+    store.fetchDiscussions(id, lessonScope)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, forUserId])
 
   // Derive material & styled PDF states from currentLesson.final_content
   const fc = currentLesson?.final_content || {}
@@ -157,16 +248,37 @@ export default function LessonProcess() {
     || fc.material_optimized_status === 'generating'
     || fc.styled_pdf_status === 'generating'
 
-  // Polling for state recovery (keep polling while lesson processing OR background tasks running)
+  // Polling for state recovery — lightweight /status endpoint, 5s (was 3s full JSONB)
   useEffect(() => {
     if (!id) return
     if (isComplete && !anyBgGenerating) return
-    const interval = setInterval(() => {
-      fetchLesson(id, lessonScope)
+    pollSnapshotRef.current = {
+      status: currentLesson?.status || '',
+      material_draft_status: fc.material_draft_status || '',
+      material_optimized_status: fc.material_optimized_status || '',
+      styled_pdf_status: fc.styled_pdf_status || '',
+    }
+    const tick = async () => {
+      const st = await fetchLessonStatus(id, lessonScope)
+      const prev = pollSnapshotRef.current
+      const needFull =
+        (st.status === 'completed' && prev.status !== 'completed')
+        || (st.material_draft_status === 'done' && prev.material_draft_status !== 'done')
+        || (st.material_optimized_status === 'done' && prev.material_optimized_status !== 'done')
+        || (st.styled_pdf_status === 'done' && prev.styled_pdf_status !== 'done')
+      pollSnapshotRef.current = {
+        status: st.status,
+        material_draft_status: st.material_draft_status || '',
+        material_optimized_status: st.material_optimized_status || '',
+        styled_pdf_status: st.styled_pdf_status || '',
+      }
+      if (needFull) await fetchLesson(id, lessonScope)
       if (!isComplete) fetchDiscussions(id, lessonScope)
-    }, 3000)
+    }
+    const interval = setInterval(() => { void tick() }, 5000)
+    void tick()
     return () => clearInterval(interval)
-  }, [id, isComplete, anyBgGenerating, forUserId, fetchLesson, fetchDiscussions])
+  }, [id, isComplete, anyBgGenerating, forUserId, fetchLesson, fetchLessonStatus, fetchDiscussions, currentLesson?.status, fc.material_draft_status, fc.material_optimized_status, fc.styled_pdf_status])
 
   // Derive active models from lesson data
   const activeModels: ActiveModel[] = (() => {
@@ -266,7 +378,7 @@ export default function LessonProcess() {
     joinLesson(id)
     console.log('[LessonProcess] Socket connected, joined room for', id)
 
-    socket.on('progress_update', (data: any) => {
+    const onProgress = (data: any) => {
       if (data.lesson_id !== id) return
 
       if (data.stage === 'started' && !startTimeRef.current) {
@@ -293,9 +405,10 @@ export default function LessonProcess() {
             : s
         ))
       }
-    })
+    }
+    socket.on('progress_update', onProgress)
 
-    socket.on('stream_start', (data: any) => {
+    const onStreamStart = (data: any) => {
       if (data.lesson_id !== id) return
       console.log('[LessonProcess] stream_start', data.phase, data.agent_role)
 
@@ -328,9 +441,10 @@ export default function LessonProcess() {
           },
         }))
       }
-    })
+    }
+    socket.on('stream_start', onStreamStart)
 
-    socket.on('stream_chunk', (data: any) => {
+    const onStreamChunk = (data: any) => {
       if (data.lesson_id !== id) return
 
       if (data.phase === 'model_recommendation') {
@@ -352,9 +466,10 @@ export default function LessonProcess() {
           return { ...prev, [key]: { ...current, text: current.text + data.chunk } }
         })
       }
-    })
+    }
+    socket.on('stream_chunk', onStreamChunk)
 
-    socket.on('stream_end', (data: any) => {
+    const onStreamEnd = (data: any) => {
       if (data.lesson_id !== id) return
       console.log('[LessonProcess] stream_end', data.phase, data.agent_role)
 
@@ -383,14 +498,16 @@ export default function LessonProcess() {
           }
         })
       }
-    })
+    }
+    socket.on('stream_end', onStreamEnd)
 
-    socket.on('all_drafts_ready', (data: any) => {
+    const onAllDraftsReady = (data: any) => {
       if (data.lesson_id !== id) return
       fetchLesson(id, lessonScope)
-    })
+    }
+    socket.on('all_drafts_ready', onAllDraftsReady)
 
-    socket.on('discussion_update', (data: any) => {
+    const onDiscussionUpdate = (data: any) => {
       if (data.lesson_id !== id) return
       if (data.type === 'vote_complete') {
         setStageVotes((prev) => ({
@@ -403,42 +520,47 @@ export default function LessonProcess() {
           },
         }))
       }
-    })
+    }
+    socket.on('discussion_update', onDiscussionUpdate)
 
-    socket.on('lesson_completed', (data: any) => {
+    const onLessonCompleted = (data: any) => {
       if (data.lesson_id !== id) return
       setIsComplete(true)
       fetchLesson(id, lessonScope)
       fetchDiscussions(id, lessonScope)
-    })
+    }
+    socket.on('lesson_completed', onLessonCompleted)
 
-    socket.on('stage_regenerated', (data: any) => {
+    const onStageRegenerated = (data: any) => {
       if (data.lesson_id !== id) return
       fetchLesson(id, lessonScope)
-    })
+    }
+    socket.on('stage_regenerated', onStageRegenerated)
 
-    socket.on('votes_saved', (data: any) => {
+    const onVotesSaved = (data: any) => {
       if (data.lesson_id !== id) return
       fetchDiscussions(id, lessonScope)
-    })
+    }
+    socket.on('votes_saved', onVotesSaved)
 
-    socket.on('bg_task_complete', (data: any) => {
+    const onBgTaskComplete = (data: any) => {
       if (data.lesson_id !== id) return
       fetchLesson(id, lessonScope)
-    })
+    }
+    socket.on('bg_task_complete', onBgTaskComplete)
 
     return () => {
       leaveLesson(id)
-      socket.off('progress_update')
-      socket.off('stream_start')
-      socket.off('stream_chunk')
-      socket.off('stream_end')
-      socket.off('all_drafts_ready')
-      socket.off('discussion_update')
-      socket.off('lesson_completed')
-      socket.off('stage_regenerated')
-      socket.off('votes_saved')
-      socket.off('bg_task_complete')
+      socket.off('progress_update', onProgress)
+      socket.off('stream_start', onStreamStart)
+      socket.off('stream_chunk', onStreamChunk)
+      socket.off('stream_end', onStreamEnd)
+      socket.off('all_drafts_ready', onAllDraftsReady)
+      socket.off('discussion_update', onDiscussionUpdate)
+      socket.off('lesson_completed', onLessonCompleted)
+      socket.off('stage_regenerated', onStageRegenerated)
+      socket.off('votes_saved', onVotesSaved)
+      socket.off('bg_task_complete', onBgTaskComplete)
     }
   }, [id, fetchLesson, fetchDiscussions, forUserId])
 
@@ -595,6 +717,8 @@ export default function LessonProcess() {
 
   const handleExport = async (format: string) => {
     if (!id) return
+    // 付费闸门：无额度先弹支付窗（fetch 不走 axios 拦截器，需手动预检）
+    if (!(await ensureExportAllowed())) { setShowExportMenu(false); return }
     setExporting(format)
     setShowExportMenu(false)
     try {
@@ -606,10 +730,16 @@ export default function LessonProcess() {
       const res = await fetch(exportUrl, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       })
+      if (res.status === 402) {
+        await usePaymentStore.getState().openGate()
+        throw new Error('导出额度不足，请先付费')
+      }
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }))
         throw new Error(err.detail || T('process.export_failed'))
       }
+      // 后端已扣额度，刷新显示
+      void refreshCreditsSoon()
       const blob = await res.blob()
       const ext = format === 'markdown' ? 'md' : format
       const safeName = (currentLesson?.title || 'lesson_plan').replace(/[<>:"/\\|?*]/g, '_')
@@ -657,6 +787,15 @@ export default function LessonProcess() {
 
   const draftStatus = fullDraftStreaming ? 'streaming' : fullDraftText ? 'done' : 'pending'
   const optimizedStatus = fullOptimizedStreaming ? 'streaming' : fullOptimizedText ? 'done' : 'pending'
+
+  // 可见性分级：非管理员在「优秀教案」生成完成前，看不到初稿正文、不可导出
+  const isAdminUser = isAdmin(parseAccessLevel(user?.access_level))
+  const optimizedReady = !!fullOptimizedText || !!(currentLesson?.final_content?.full_optimized)
+  const canSeeContent = isAdminUser || optimizedReady
+  // 非管理员永不停留在「初步教案」tab（初稿仅管理员可见）
+  useEffect(() => {
+    if (!isAdminUser && activeVersion === 'draft') setActiveVersion('optimized')
+  }, [isAdminUser, activeVersion])
 
   const lessonMode = (currentLesson?.mode as string | undefined) || (fc.mode as string | undefined) || 'full_auto'
   const isQuickMode = lessonMode === 'quick'
@@ -829,9 +968,17 @@ export default function LessonProcess() {
                 <div className="space-y-6">
                   {/* Expert analysis */}
                   <div>
-                    <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">
-                      {T('process.expert_analysis')}
-                    </h3>
+                    <div className="flex items-center justify-between mb-1">
+                      <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider">
+                        {T('process.expert_analysis')}
+                      </h3>
+                      <button
+                        onClick={() => setActiveVersion('analysis')}
+                        className="text-xs text-brand-600 hover:text-brand-700 font-medium"
+                      >
+                        {T('process.view_analysis_detail')} →
+                      </button>
+                    </div>
                     {sections[activeSectionIdx] && (
                       <p className="text-xs text-gray-600 mb-3 font-medium">
                         {sections[activeSectionIdx].modelName} — {sections[activeSectionIdx].name}
@@ -969,6 +1116,8 @@ export default function LessonProcess() {
           <div className="flex-shrink-0 border-b border-gray-200 bg-white px-6 py-3">
             <div className="flex items-center gap-3">
               <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mr-2">{T('process.versions')}</h3>
+              {/* 初步教案 tab 仅管理员可见 */}
+              {isAdminUser && (
               <button
                 onClick={() => setActiveVersion('draft')}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg border transition-all text-sm ${
@@ -980,6 +1129,7 @@ export default function LessonProcess() {
                 <span>{T('process.draft')}</span>
                 <StatusBadge status={draftStatus} T={T} />
               </button>
+              )}
               <button
                 onClick={() => setActiveVersion('optimized')}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg border transition-all text-sm ${
@@ -991,6 +1141,17 @@ export default function LessonProcess() {
                 <span>{T('process.optimized')}</span>
                 <StatusBadge status={optimizedStatus} T={T} />
               </button>
+              <button
+                onClick={() => setActiveVersion('analysis')}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg border transition-all text-sm ${
+                  activeVersion === 'analysis'
+                    ? 'border-brand-300 bg-brand-50 shadow-sm text-brand-700 font-medium'
+                    : 'border-gray-200 bg-white hover:border-gray-300 text-gray-600'
+                }`}
+              >
+                <span>{T('process.analysis_tab')}</span>
+              </button>
+              {canSeeContent && (
               <button
                 onClick={() => setActiveVersion('materials')}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg border transition-all text-sm ${
@@ -1010,6 +1171,7 @@ export default function LessonProcess() {
                   <span className="w-2 h-2 rounded-full bg-green-500" />
                 )}
               </button>
+              )}
               <div className="ml-auto">
                 {activeVersion !== 'materials' && activeDocStreaming && (
                   <span className="flex items-center gap-1.5 text-xs text-brand-600 bg-brand-50 px-2.5 py-1 rounded-full animate-pulse">
@@ -1029,19 +1191,196 @@ export default function LessonProcess() {
 
           {/* Document / Materials content (independently scrollable) */}
           <div className="flex-1 panel-scroll" ref={centerPanelRef}>
-            {activeVersion === 'materials' ? (
+            {activeVersion === 'analysis' ? (
+              /* ===== 专家分析详情（当前环节的全部专家意见 + 投票），大区域展示 ===== */
+              <div className="max-w-3xl mx-auto p-6 space-y-5">
+                <div>
+                  <h2 className="text-lg font-semibold text-gray-900">{T('process.expert_analysis')}</h2>
+                  {activeSection && sections[activeSectionIdx] && (
+                    <p className="text-sm text-gray-500 mt-1">
+                      {sections[activeSectionIdx].modelName} — {sections[activeSectionIdx].name}
+                    </p>
+                  )}
+                </div>
+                {!activeSection ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-gray-400">
+                    <FileText className="w-6 h-6 mb-2" />
+                    <span className="text-sm">{T('process.analysis_select_hint')}</span>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {activeAnalysisStreams.length > 0 && activeAnalysisStreams.map((buf) => (
+                      <AgentCard
+                        key={`rstream-${activeStageNum}-${buf.agentRole}`}
+                        role={buf.agentRole}
+                        streamingText={buf.text}
+                        isStreaming={!buf.done}
+                        provider={buf.provider}
+                      />
+                    ))}
+                    {activeAnalysisStreams.length === 0 && sectionDiscussions.map((d) => (
+                      <AgentCard
+                        key={`r-${d.id}`}
+                        role={d.agent_role}
+                        opinion={d.opinion}
+                        isAccepted={d.is_accepted}
+                        votes={d.votes || null}
+                        timestamp={d.created_at ? new Date(d.created_at).toLocaleTimeString(useLanguageStore.getState().locale, { hour12: false }) : undefined}
+                        onRegenerate={() => handleRegenerateDiscussion(d.id)}
+                        isRegenerating={regeneratingDiscussions.has(d.id)}
+                      />
+                    ))}
+                    {activeAnalysisStreams.length === 0 && sectionDiscussions.length === 0 && (
+                      <div className="text-sm text-gray-400 py-6 text-center">{T('process.detail_generating')}</div>
+                    )}
+                    {/* 投票结果 */}
+                    {stageVotes[activeStageNum] && (
+                      <VoteResult
+                        agree={stageVotes[activeStageNum].agree || 0}
+                        disagree={stageVotes[activeStageNum].disagree || 0}
+                        acceptedRole={stageVotes[activeStageNum].accepted_role}
+                        passRate={stageVotes[activeStageNum].pass_rate}
+                      />
+                    )}
+                    {!stageVotes[activeStageNum] && sectionDiscussions.filter((d) => d.is_accepted).map((d) => {
+                      const summary = d.votes?.summary || d.votes || {}
+                      return (
+                        <VoteResult
+                          key={`rv-${d.id}`}
+                          agree={summary.agree || 0}
+                          disagree={summary.disagree || 0}
+                          acceptedRole={d.agent_role}
+                          passRate={d.pass_rate || 0}
+                        />
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            ) : !canSeeContent ? (
+              /* ===== 非管理员·优秀教案未完成：教案详情/生成过程（不展示初稿正文） ===== */
+              <div className="max-w-3xl mx-auto p-6 space-y-5">
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+                  {T('process.optimized_pending')}
+                </div>
+                <div className="rounded-xl border border-gray-200 bg-white p-5">
+                  <h3 className="text-sm font-semibold text-gray-900 mb-2">{T('process.lesson_info')}</h3>
+                  <div className="text-sm text-gray-700">{currentLesson?.title}</div>
+                  <div className="text-xs text-gray-500 mt-1">
+                    {currentLesson?.subject} · {currentLesson?.grade_level}
+                    {currentLesson?.topic ? ` · ${currentLesson.topic}` : ''}
+                  </div>
+                </div>
+                <div className="rounded-xl border border-gray-200 bg-white p-5">
+                  <h3 className="text-sm font-semibold text-gray-900 mb-3">{T('process.scaffold')}</h3>
+                  {(() => {
+                    const models = (currentLesson?.final_content?.model_recommendation?.selected_models) as any[] | undefined
+                    if (!models || !models.length) {
+                      return <div className="text-xs text-gray-400">{T('process.detail_generating')}</div>
+                    }
+                    return (
+                      <div className="space-y-3">
+                        {models.map((m: any, mi: number) => (
+                          <div key={mi} className="border-l-2 border-brand-200 pl-3">
+                            <div className="text-sm font-medium text-gray-800">{m?.name || m?.model_name || `模型 ${mi + 1}`}</div>
+                            {Array.isArray(m?.stages) && (
+                              <ol className="mt-1 list-decimal list-inside text-xs text-gray-600 space-y-0.5">
+                                {m.stages.map((s: any, si: number) => (
+                                  <li key={si}>{typeof s === 'string' ? s : (s?.name || s?.stage_name || '')}</li>
+                                ))}
+                              </ol>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )
+                  })()}
+                </div>
+                <div className="rounded-xl border border-gray-200 bg-white p-4 text-xs text-gray-500">
+                  {T('process.detail_hint')}
+                </div>
+              </div>
+            ) : activeVersion === 'materials' ? (
               /* ===== Materials Panel ===== */
               <div className="max-w-3xl mx-auto p-6 space-y-6">
                 {/* Header */}
-                <div>
-                  <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                    <BookOpen className="w-5 h-5 text-teal-600" />
-                    {T('process.material_title')}
-                  </h2>
-                  <p className="text-sm text-gray-500 mt-1">
-                    {T('process.material_desc')}
-                  </p>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                      <BookOpen className="w-5 h-5 text-teal-600" />
+                      {T('process.material_title')}
+                    </h2>
+                    <p className="text-sm text-gray-500 mt-1">
+                      {T('process.material_desc')}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => navigate(`/course-tools/${id}?tab=comic${forUserId ? `&for_user_id=${encodeURIComponent(forUserId)}` : ''}`)}
+                    className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-pink-700 bg-pink-50 border border-pink-200 rounded-lg hover:bg-pink-100 transition-colors"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />{T('process.material_make_comic')}
+                  </button>
                 </div>
+
+                {/* 立体几何图片入口 */}
+                <Card className="border-indigo-200 bg-indigo-50/40">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-3">
+                      <div className="w-10 h-10 rounded-lg bg-indigo-100 flex items-center justify-center">
+                        <Sparkles className="w-5 h-5 text-indigo-600" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-semibold text-gray-900">{T('process.geo_upload_title')}</h3>
+                        <p className="text-xs text-gray-500 mt-0.5">{T('process.geo_upload_desc')}</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => geoFileRef.current?.click()}
+                      disabled={geoBusy !== null}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-60 transition-colors whitespace-nowrap"
+                    >
+                      {geoBusy === 'recognizing'
+                        ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />{T('process.geo_recognizing')}</>
+                        : <><Sparkles className="w-3.5 h-3.5" />{T('process.geo_upload_image')}</>}
+                    </button>
+                    <input
+                      ref={geoFileRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={onGeoImagePicked}
+                    />
+                  </div>
+
+                  {geoError && (
+                    <div className="mt-3 p-2.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-600">{geoError}</div>
+                  )}
+
+                  {geoRecognized && (
+                    <div className="mt-3 p-3 bg-white border border-indigo-200 rounded-lg">
+                      <p className="text-xs font-medium text-gray-700 mb-1.5">{T('process.geo_confirm_title')}</p>
+                      <p className="text-sm text-gray-900">{geoRecognized.title || geoRecognized.spec?.body}</p>
+                      <p className="text-[11px] text-gray-500 mt-1 break-all">
+                        {geoRecognized.spec?.body} · {geoRecognized.spec?.query?.type}
+                      </p>
+                      <div className="flex flex-wrap gap-2 mt-3">
+                        <Button onClick={() => confirmGeoGenerate('draft')} disabled={geoBusy !== null}>
+                          {geoBusy === 'generating'
+                            ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" />
+                            : <Sparkles className="w-4 h-4 mr-1.5" />}
+                          {T('process.geo_confirm_generate')}
+                        </Button>
+                        <button
+                          onClick={() => { setGeoRecognized(null); setGeoError('') }}
+                          disabled={geoBusy !== null}
+                          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-60"
+                        >
+                          <X className="w-3.5 h-3.5" />{T('process.geo_cancel')}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </Card>
 
                 {/* Material cards for each version */}
                 {([
@@ -1067,7 +1406,29 @@ export default function LessonProcess() {
                           )}
                         </div>
                         <div>
-                          <h3 className="text-sm font-semibold text-gray-900">{label}{T('process.material_version')}</h3>
+                          <h3 className="text-sm font-semibold text-gray-900">
+                            {label}{T('process.material_version')}
+                            {task?.status === 'done' && (fc as any)[`material_${version}_engine`] === 'edu-solid-geometry' && (
+                              <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-100 text-indigo-700 align-middle">
+                                {T('process.material_geo_badge')}
+                              </span>
+                            )}
+                            {task?.status === 'done' && (fc as any)[`material_${version}_engine`] === 'edu-chem-reaction' && (
+                              <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-700 align-middle">
+                                {T('process.material_chem_badge')}
+                              </span>
+                            )}
+                            {task?.status === 'done' && (fc as any)[`material_${version}_engine`] === 'doubao_two_stage' && (
+                              <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-teal-100 text-teal-700 align-middle">
+                                {T('process.material_doubao_badge')}
+                              </span>
+                            )}
+                            {task?.status === 'done' && (fc as any)[`material_${version}_engine`] === 'doubao_single_shot' && (
+                              <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-600 align-middle">
+                                {T('process.material_doubao_fallback_badge')}
+                              </span>
+                            )}
+                          </h3>
                           <p className="text-xs text-gray-500 mt-0.5">
                             {task?.status === 'generating' && (
                               <span className="text-teal-600">
@@ -1099,7 +1460,7 @@ export default function LessonProcess() {
                             <button
                               onClick={() => {
                                 const win = window.open('', '_blank')
-                                if (win) { win.document.write(task.html); win.document.close() }
+                                if (win) { win.document.write(sanitizePreviewHtml(task.html)); win.document.close() }
                               }}
                               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-teal-700 bg-teal-50 border border-teal-200 rounded-lg hover:bg-teal-100 transition-colors"
                             >
@@ -1107,16 +1468,27 @@ export default function LessonProcess() {
                               {T('process.material_new_window')}
                             </button>
                             <button
-                              onClick={() => {
-                                const blob = new Blob([task.html], { type: 'text/html;charset=utf-8' })
+                              onClick={async () => {
+                                if (!(await consumeExportCredit())) return
+                                const safeHtml = sanitizePreviewHtml(task.html)
+                                const blob = new Blob([safeHtml], { type: 'text/html;charset=utf-8' })
                                 const url = URL.createObjectURL(blob)
                                 const a = document.createElement('a')
+                                const fname = `${(currentLesson?.title || 'material').replace(/[<>:"/\\|?*]/g, '_')}_${version}_material.html`
                                 a.href = url
-                                a.download = `${(currentLesson?.title || 'material').replace(/[<>:"/\\|?*]/g, '_')}_${version}_material.html`
+                                a.download = fname
                                 document.body.appendChild(a)
                                 a.click()
                                 document.body.removeChild(a)
                                 URL.revokeObjectURL(url)
+                                void logClientDownload({
+                                  lesson_plan_id: id || null,
+                                  source_kind: 'material',
+                                  format: 'html',
+                                  file_name: fname,
+                                  file_size: blob.size,
+                                  params: { content_version: version },
+                                })
                               }}
                               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 border border-gray-200 rounded-lg hover:bg-gray-200 transition-colors"
                             >
@@ -1356,16 +1728,26 @@ export default function LessonProcess() {
                   {T('process.material_preview_new')}
                 </button>
                 <button
-                  onClick={() => {
+                  onClick={async () => {
+                    if (!(await consumeExportCredit())) return
                     const blob = new Blob([sanitizePreviewHtml(previewingMaterial.html)], { type: 'text/html;charset=utf-8' })
                     const url = URL.createObjectURL(blob)
                     const a = document.createElement('a')
+                    const fname = `${previewingMaterial.title.replace(/[<>:"/\\|?*]/g, '_')}.html`
                     a.href = url
-                    a.download = `${previewingMaterial.title.replace(/[<>:"/\\|?*]/g, '_')}.html`
+                    a.download = fname
                     document.body.appendChild(a)
                     a.click()
                     document.body.removeChild(a)
                     URL.revokeObjectURL(url)
+                    void logClientDownload({
+                      lesson_plan_id: id || null,
+                      source_kind: 'material',
+                      format: 'html',
+                      file_name: fname,
+                      file_size: blob.size,
+                      params: { content_version: previewingMaterial.version },
+                    })
                   }}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 border border-gray-200 rounded-lg hover:bg-gray-200 transition-colors"
                 >
@@ -1383,7 +1765,7 @@ export default function LessonProcess() {
                 title="Course Material Preview"
                 className="w-full h-full border-0"
                 style={{ minHeight: '600px' }}
-                sandbox="allow-scripts"
+                sandbox="allow-scripts allow-same-origin allow-popups"
               />
             </div>
           </div>
@@ -1498,16 +1880,26 @@ export default function LessonProcess() {
                   {T('process.styled_print')}
                 </button>
                 <button
-                  onClick={() => {
+                  onClick={async () => {
+                    if (!(await consumeExportCredit())) return
                     const blob = new Blob([sanitizePreviewHtml(styledPdfTask.html)], { type: 'text/html;charset=utf-8' })
                     const url = URL.createObjectURL(blob)
                     const a = document.createElement('a')
+                    const fname = `${(currentLesson?.title || 'lesson').replace(/[<>:"/\\|?*]/g, '_')}_styled.html`
                     a.href = url
-                    a.download = `${(currentLesson?.title || 'lesson').replace(/[<>:"/\\|?*]/g, '_')}_styled.html`
+                    a.download = fname
                     document.body.appendChild(a)
                     a.click()
                     document.body.removeChild(a)
                     URL.revokeObjectURL(url)
+                    void logClientDownload({
+                      lesson_plan_id: id || null,
+                      source_kind: 'styled_pdf',
+                      format: 'html',
+                      file_name: fname,
+                      file_size: blob.size,
+                      params: { content_version: styledPdfTask.contentVersion },
+                    })
                   }}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 border border-gray-200 rounded-lg hover:bg-gray-200 transition-colors"
                 >
@@ -1525,7 +1917,7 @@ export default function LessonProcess() {
                 title="Styled PDF Preview"
                 className="w-full h-full border-0"
                 style={{ minHeight: '600px' }}
-                sandbox="allow-popups allow-modals allow-downloads"
+                sandbox="allow-scripts allow-same-origin allow-popups allow-modals allow-downloads"
               />
             </div>
           </div>

@@ -11,10 +11,10 @@ import { toast } from '../components/ui/Toast'
 import { getSocket } from '../services/socket'
 import {
   FileText, Presentation, ClipboardList, FlaskConical,
-  Download, Loader2, Sparkles, Merge, Palette, RefreshCw, Check,
+  Download, Loader2, Sparkles, Merge, Palette, RefreshCw, Check, Image, Eye, Layers,
 } from 'lucide-react'
 
-type Tab = 'outline' | 'ppt' | 'exercises' | 'practice'
+type Tab = 'outline' | 'ppt' | 'exercises' | 'practice' | 'comic' | 'cards'
 
 interface HistoryItem {
   id: string; tool_type: string; title: string; created_at: string; params: Record<string, any>
@@ -34,6 +34,8 @@ const TABS: { key: Tab; icon: typeof FileText; labelKey: string }[] = [
   { key: 'ppt', icon: Presentation, labelKey: 'tools.tab_ppt' },
   { key: 'exercises', icon: ClipboardList, labelKey: 'tools.tab_exercises' },
   { key: 'practice', icon: FlaskConical, labelKey: 'tools.tab_practice' },
+  { key: 'comic', icon: Image, labelKey: 'tools.tab_comic' },
+  { key: 'cards', icon: Layers, labelKey: 'tools.tab_cards' },
 ]
 
 const STYLE_TAGS = ['childish', 'academic', 'business', 'minimal', 'tech', 'natural', 'artistic'] as const
@@ -167,6 +169,23 @@ export default function CourseTools() {
   const [practiceResult, setPracticeResult] = useState<any>(null)
   const [practiceId, setPracticeId] = useState('')
 
+  // comic 知识漫画
+  const [comicResult, setComicResult] = useState<any>(null)
+  const [comicId, setComicId] = useState('')
+  const [comicArt, setComicArt] = useState('ligne-claire')
+  const [comicTone, setComicTone] = useState('warm')
+  const [comicLayout, setComicLayout] = useState('standard')
+  const [comicAspect, setComicAspect] = useState('3:4')
+  const [comicWithImages, setComicWithImages] = useState(true)
+
+  // cards 英语学习卡片
+  const [cardsResult, setCardsResult] = useState<any>(null)
+  const [cardsId, setCardsId] = useState('')
+  const [cardsTheme, setCardsTheme] = useState('minimal')
+  const [cardsAspect, setCardsAspect] = useState('3:4')
+  const [cardsCount, setCardsCount] = useState(10)
+  const [cardsWithImages, setCardsWithImages] = useState(true)
+
   useEffect(() => {
     const lid = source?.kind === 'lesson' ? source.id : lessonId
     api.get('/api/v1/course-tools/history', { params: { lesson_id: lid || undefined, ...(scopeParams || {}) } })
@@ -195,6 +214,10 @@ export default function CourseTools() {
             setExResult(d.result); setExId(d.id); break
           case 'practice':
             setPracticeResult(d.result); setPracticeId(d.id); break
+          case 'comic':
+            setComicResult(d.result); setComicId(d.id); break
+          case 'cards':
+            setCardsResult(d.result); setCardsId(d.id); break
         }
       })
       .catch(() => {})
@@ -222,6 +245,10 @@ export default function CourseTools() {
             if (exId === rid || !exId) { setExResult(d.result); setExId(d.id) } break
           case 'practice':
             if (practiceId === rid || !practiceId) { setPracticeResult(d.result); setPracticeId(d.id) } break
+          case 'comic':
+            if (comicId === rid || !comicId) { setComicResult(d.result); setComicId(d.id) } break
+          case 'cards':
+            if (cardsId === rid || !cardsId) { setCardsResult(d.result); setCardsId(d.id) } break
         }
       } catch {}
     }
@@ -255,8 +282,8 @@ export default function CourseTools() {
     try {
       const res = await api.post(`/api/v1/course-tools/${endpoint}`, formData(extra))
       const d = res.data
-      const toolType = (d.tool_type as 'outline' | 'ppt' | 'exercises' | 'practice') ||
-        ((['outline', 'ppt', 'exercises', 'practice'] as const).find(x => endpoint.startsWith(x))) ||
+      const toolType = (d.tool_type as 'outline' | 'ppt' | 'exercises' | 'practice' | 'comic' | 'cards') ||
+        ((['outline', 'ppt', 'exercises', 'practice', 'comic', 'cards'] as const).find(x => endpoint.startsWith(x))) ||
         'outline'
       // remember pending result id in the same slot so socket completion can fill it later
       switch (toolType) {
@@ -264,6 +291,8 @@ export default function CourseTools() {
         case 'ppt': setPptId(d.result_id || d.id); break
         case 'exercises': setExId(d.result_id || d.id); break
         case 'practice': setPracticeId(d.result_id || d.id); break
+        case 'comic': setComicId(d.result_id || d.id); break
+        case 'cards': setCardsId(d.result_id || d.id); break
       }
       addJob({
         result_id: d.result_id || d.id,
@@ -285,6 +314,18 @@ export default function CourseTools() {
     const a = document.createElement('a')
     a.href = `/api/v1/course-tools/${endpoint}`
     a.click()
+  }
+
+  const previewInNewTab = async (endpoint: string) => {
+    try {
+      const res = await api.get(`/api/v1/course-tools/${endpoint}`, { params: scopeParams, responseType: 'blob' })
+      const blob = new Blob([res.data], { type: 'text/html' })
+      const url = URL.createObjectURL(blob)
+      window.open(url, '_blank', 'noopener,noreferrer')
+      setTimeout(() => URL.revokeObjectURL(url), 60000)
+    } catch {
+      setError(t('tools.preview_failed'))
+    }
   }
 
   const downloadWithAuth = async (endpoint: string) => {
@@ -721,6 +762,149 @@ export default function CourseTools() {
                           <Merge className="w-4 h-4 mr-2" />{t('tools.merge_to_ppt')}
                         </Button>
                       )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── Comic Tab 知识漫画 ── */}
+            {tab === 'comic' && (
+              <div className="bg-white rounded-xl border p-6 space-y-5">
+                <h2 className="text-lg font-semibold">{t('tools.comic_title')}</h2>
+                <p className="text-sm text-gray-500">{t('tools.comic_desc')}</p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-sm text-gray-600 block mb-1">{t('tools.comic_art')}</label>
+                    <select value={comicArt} onChange={e => setComicArt(e.target.value)}
+                      className="w-full rounded-lg border border-gray-200 p-2 text-sm">
+                      <option value="ligne-claire">{t('tools.comic_art_ligne')}</option>
+                      <option value="manga">{t('tools.comic_art_manga')}</option>
+                      <option value="ink-brush">{t('tools.comic_art_ink')}</option>
+                      <option value="chalk">{t('tools.comic_art_chalk')}</option>
+                      <option value="realistic">{t('tools.comic_art_realistic')}</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-sm text-gray-600 block mb-1">{t('tools.comic_tone')}</label>
+                    <select value={comicTone} onChange={e => setComicTone(e.target.value)}
+                      className="w-full rounded-lg border border-gray-200 p-2 text-sm">
+                      <option value="warm">{t('tools.comic_tone_warm')}</option>
+                      <option value="neutral">{t('tools.comic_tone_neutral')}</option>
+                      <option value="energetic">{t('tools.comic_tone_energetic')}</option>
+                      <option value="dramatic">{t('tools.comic_tone_dramatic')}</option>
+                      <option value="vintage">{t('tools.comic_tone_vintage')}</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-sm text-gray-600 block mb-1">{t('tools.comic_layout')}</label>
+                    <select value={comicLayout} onChange={e => setComicLayout(e.target.value)}
+                      className="w-full rounded-lg border border-gray-200 p-2 text-sm">
+                      <option value="standard">{t('tools.comic_layout_standard')}</option>
+                      <option value="cinematic">{t('tools.comic_layout_cinematic')}</option>
+                      <option value="dense">{t('tools.comic_layout_dense')}</option>
+                      <option value="webtoon">{t('tools.comic_layout_webtoon')}</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-sm text-gray-600 block mb-1">{t('tools.comic_aspect')}</label>
+                    <select value={comicAspect} onChange={e => setComicAspect(e.target.value)}
+                      className="w-full rounded-lg border border-gray-200 p-2 text-sm">
+                      <option value="3:4">3:4</option>
+                      <option value="4:3">4:3</option>
+                      <option value="16:9">16:9</option>
+                    </select>
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 text-sm text-gray-700 select-none">
+                  <input type="checkbox" checked={comicWithImages}
+                    onChange={e => setComicWithImages(e.target.checked)} className="rounded" />
+                  {t('tools.with_images')}
+                </label>
+                <Button onClick={() => generate('comic', {
+                  art: comicArt, tone: comicTone, layout: comicLayout, aspect: comicAspect, lang: 'zh',
+                  with_images: comicWithImages,
+                }, d => { setComicResult(d.result); setComicId(d.id) })} disabled={loading} className="w-full">
+                  {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Sparkles className="w-4 h-4 mr-2" />}
+                  {t('tools.generate_comic')}
+                </Button>
+                {comicResult && (
+                  <div className="mt-4 space-y-3">
+                    <h3 className="font-medium text-gray-800">{comicResult.title}</h3>
+                    {comicResult.summary && <p className="text-sm text-gray-500">{comicResult.summary}</p>}
+                    <div className="text-xs text-gray-500">
+                      {t('tools.comic_pages_label')}: {(comicResult.pages || []).length}
+                    </div>
+                    <div className="flex gap-3 flex-wrap">
+                      <Button onClick={() => previewInNewTab(`comic/${comicId}/preview`)}>
+                        <Eye className="w-4 h-4 mr-2" />{t('tools.preview_html')}
+                      </Button>
+                      <Button variant="secondary" onClick={() => downloadWithAuth(`comic/${comicId}/download-html`)}>
+                        <Download className="w-4 h-4 mr-2" />{t('tools.download_html')}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── Cards Tab 英语卡片 ── */}
+            {tab === 'cards' && (
+              <div className="bg-white rounded-xl border p-6 space-y-5">
+                <h2 className="text-lg font-semibold">{t('tools.cards_title')}</h2>
+                <p className="text-sm text-gray-500">{t('tools.cards_desc')}</p>
+                <div className="grid grid-cols-3 gap-4">
+                  <div>
+                    <label className="text-sm text-gray-600 block mb-1">{t('tools.cards_theme')}</label>
+                    <select value={cardsTheme} onChange={e => setCardsTheme(e.target.value)}
+                      className="w-full rounded-lg border border-gray-200 p-2 text-sm">
+                      <option value="minimal">{t('tools.cards_theme_minimal')}</option>
+                      <option value="kawaii">{t('tools.cards_theme_kawaii')}</option>
+                      <option value="kraft">{t('tools.cards_theme_kraft')}</option>
+                      <option value="sky">{t('tools.cards_theme_sky')}</option>
+                      <option value="dark">{t('tools.cards_theme_dark')}</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-sm text-gray-600 block mb-1">{t('tools.cards_aspect')}</label>
+                    <select value={cardsAspect} onChange={e => setCardsAspect(e.target.value)}
+                      className="w-full rounded-lg border border-gray-200 p-2 text-sm">
+                      <option value="3:4">3:4</option>
+                      <option value="1:1">1:1</option>
+                      <option value="4:3">4:3</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-sm text-gray-600 block mb-1">{t('tools.cards_count')}</label>
+                    <input type="number" min={4} max={30} value={cardsCount} onChange={e => setCardsCount(+e.target.value)}
+                      className="w-full rounded-lg border border-gray-200 p-2 text-sm" />
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 text-sm text-gray-700 select-none">
+                  <input type="checkbox" checked={cardsWithImages}
+                    onChange={e => setCardsWithImages(e.target.checked)} className="rounded" />
+                  {t('tools.with_images')}
+                </label>
+                <Button onClick={() => generate('cards', {
+                  theme: cardsTheme, aspect: cardsAspect, count: cardsCount, lang: 'en',
+                  with_images: cardsWithImages,
+                }, d => { setCardsResult(d.result); setCardsId(d.id) })} disabled={loading} className="w-full">
+                  {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Sparkles className="w-4 h-4 mr-2" />}
+                  {t('tools.generate_cards')}
+                </Button>
+                {cardsResult && (
+                  <div className="mt-4 space-y-3">
+                    <h3 className="font-medium text-gray-800">{cardsResult.title}</h3>
+                    <div className="text-xs text-gray-500">
+                      {t('tools.cards_count_label')}: {(cardsResult.cards || []).length}
+                    </div>
+                    <div className="flex gap-3 flex-wrap">
+                      <Button onClick={() => previewInNewTab(`cards/${cardsId}/preview`)}>
+                        <Eye className="w-4 h-4 mr-2" />{t('tools.preview_html')}
+                      </Button>
+                      <Button variant="secondary" onClick={() => downloadWithAuth(`cards/${cardsId}/download-html`)}>
+                        <Download className="w-4 h-4 mr-2" />{t('tools.download_html')}
+                      </Button>
                     </div>
                   </div>
                 )}

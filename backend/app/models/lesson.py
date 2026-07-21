@@ -41,6 +41,8 @@ class LessonPlan(Base):
     sequence_id = Column(String(36), nullable=True)
     sequence_order = Column(Integer, nullable=True)
     education_level = Column(String(20), default="k12")
+    # 所选教材（ChinaTextbook 接地）：紧凑串，如 "人教版·七年级上册·第2章 整式的加减"
+    textbook_ref = Column(String(300), nullable=True)
 
     source_type = Column(String(20), nullable=False)
     source_content = Column(Text)
@@ -51,6 +53,7 @@ class LessonPlan(Base):
     completed_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    deleted_at = Column(DateTime, nullable=True, index=True)
 
 
 class Discussion(Base):
@@ -96,6 +99,7 @@ class LessonSeries(Base):
     special_requirements = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    deleted_at = Column(DateTime, nullable=True, index=True)
 
 
 class Annotation(Base):
@@ -135,6 +139,7 @@ class DocumentVersion(Base):
     ai_prompt = Column(Text, nullable=True)
     is_current = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
+    deleted_at = Column(DateTime, nullable=True, index=True)
 
 
 class ExportRecord(Base):
@@ -161,3 +166,4 @@ class ExportRecord(Base):
     expires_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now(), index=True)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    deleted_at = Column(DateTime, nullable=True, index=True)

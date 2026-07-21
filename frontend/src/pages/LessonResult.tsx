@@ -8,6 +8,9 @@ import Card from '../components/ui/Card'
 import { ArrowLeft, FileJson, FileText, Eye, BookOpen, Sparkles } from 'lucide-react'
 import TeachingFeedback from '../components/lesson/TeachingFeedback'
 import { useT } from '../i18n/translations'
+import { useAuthStore } from '../stores/authStore'
+import { parseAccessLevel, isAdmin } from '../lib/access'
+import { ensureExportAllowed, refreshCreditsSoon } from '../lib/exportGate'
 
 type ViewMode = 'optimized' | 'draft' | 'stages'
 
@@ -22,13 +25,14 @@ export default function LessonResult() {
   )
   const scopeQs = forUserId ? `?for_user_id=${encodeURIComponent(forUserId)}` : ''
   const t = useT()
-  const { currentLesson, fetchLesson } = useLessonStore()
+  const currentLesson = useLessonStore((s) => s.currentLesson)
   const [activeStage, setActiveStage] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>('optimized')
 
   useEffect(() => {
-    if (id) fetchLesson(id, lessonScope)
-  }, [id, forUserId, fetchLesson])
+    if (id) useLessonStore.getState().fetchLesson(id, lessonScope)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, forUserId])
 
   // 仅在教案 id 变化（即载入一份新教案）时初始化默认 viewMode，
   // 避免用户在 stages 视图里点章节时被重置回 optimized 视图。
@@ -68,7 +72,14 @@ export default function LessonResult() {
   const fullDraft = content?.full_draft || ''
   const fullOptimized = content?.full_optimized || ''
 
+  // 可见性分级：非管理员只见优秀教案且需生成完成后
+  const user = useAuthStore.getState().user
+  const isAdminUser = isAdmin(parseAccessLevel(user?.access_level))
+  const optimizedReady = !!fullOptimized
+  const canSeeContent = isAdminUser || optimizedReady
+
   const handleExport = async (format: string) => {
+    if (!(await ensureExportAllowed())) return
     try {
       let exportUrl = `/api/v1/export/${format}/${id}`
       if (forUserId) exportUrl += `?for_user_id=${encodeURIComponent(forUserId)}`
@@ -85,6 +96,7 @@ export default function LessonResult() {
       a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(blobUrl)
+      void refreshCreditsSoon()
     } catch (err: any) {
       const detail = err?.message?.trim?.() || ''
       const msg =
@@ -119,14 +131,18 @@ export default function LessonResult() {
             </div>
           </div>
           <div className="flex gap-2">
-            <Button variant="secondary" size="sm" onClick={() => handleExport('json')}>
-              <FileJson className="w-4 h-4 mr-1.5" />
-              JSON
-            </Button>
-            <Button variant="secondary" size="sm" onClick={() => handleExport('txt')}>
-              <FileText className="w-4 h-4 mr-1.5" />
-              TXT
-            </Button>
+            {canSeeContent && (
+              <>
+                <Button variant="secondary" size="sm" onClick={() => handleExport('json')}>
+                  <FileJson className="w-4 h-4 mr-1.5" />
+                  JSON
+                </Button>
+                <Button variant="secondary" size="sm" onClick={() => handleExport('txt')}>
+                  <FileText className="w-4 h-4 mr-1.5" />
+                  TXT
+                </Button>
+              </>
+            )}
             <Link to={`/lesson/${id}/process${scopeQs}`}>
               <Button variant="ghost" size="sm">
                 <Eye className="w-4 h-4 mr-1.5" />
@@ -136,7 +152,17 @@ export default function LessonResult() {
           </div>
         </div>
 
+        {/* 非管理员·优秀教案未完成：占位提示（初稿仅管理员可见） */}
+        {!canSeeContent && (
+          <Card>
+            <div className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-4">
+              {t('process.optimized_pending')}
+            </div>
+          </Card>
+        )}
+
         {/* View mode tabs */}
+        {canSeeContent && (
         <div className="flex items-center gap-2 mb-6">
           {fullOptimized && (
             <button
@@ -176,9 +202,10 @@ export default function LessonResult() {
             {t('result.tab_stages')}
           </button>
         </div>
+        )}
 
         {/* Document view */}
-        {viewMode === 'optimized' && fullOptimized && (
+        {canSeeContent && viewMode === 'optimized' && fullOptimized && (
           <Card>
             <h2 className="text-lg font-semibold text-gray-900">{t('result.optimized_title')}</h2>
             <p className="text-sm text-gray-500 mt-1 mb-4">{t('process.optimized_desc')}</p>
@@ -188,7 +215,7 @@ export default function LessonResult() {
           </Card>
         )}
 
-        {viewMode === 'draft' && fullDraft && (
+        {canSeeContent && viewMode === 'draft' && fullDraft && (
           <Card>
             <h2 className="text-lg font-semibold text-gray-900">{t('result.draft_title')}</h2>
             <p className="text-sm text-gray-500 mt-1 mb-4">{t('process.draft_desc')}</p>
@@ -199,7 +226,7 @@ export default function LessonResult() {
         )}
 
         {/* Per-stage view */}
-        {viewMode === 'stages' && (
+        {canSeeContent && viewMode === 'stages' && (
           <div className="grid lg:grid-cols-[240px_1fr] gap-6">
             <Card padding={false} className="h-fit sticky top-24">
               <div className="p-4">

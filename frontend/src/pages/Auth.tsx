@@ -12,7 +12,7 @@ export default function Auth() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const { login } = useAuthStore()
+  const login = useAuthStore((s) => s.login)
   const navigate = useNavigate()
 
   const handleSubmit = async (e: React.FormEvent) => {

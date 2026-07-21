@@ -27,7 +27,12 @@ export default function QuickGenerate() {
     { key: 'docx', label: t('process.export_word'), icon: 'W' },
     { key: 'pdf', label: t('process.export_pdf'), icon: 'Pdf' },
   ]
-  const { createLesson, fetchLesson, currentLesson } = useLessonStore()
+  const createLesson = useLessonStore((s) => s.createLesson)
+  const currentLesson = useLessonStore((s) => s.currentLesson)
+  const fetchLesson = useMemo(
+    () => (id: string, scope?: LessonsScope) => useLessonStore.getState().fetchLesson(id, scope),
+    [],
+  )
 
   const [topic, setTopic] = useState('')
   const [subject, setSubject] = useState('')
@@ -70,8 +75,8 @@ export default function QuickGenerate() {
 
   useEffect(() => {
     if (!lessonId) return
-    fetchLesson(lessonId, lessonScope)
-  }, [lessonId, lessonScope, fetchLesson])
+    useLessonStore.getState().fetchLesson(lessonId, lessonScope)
+  }, [lessonId, lessonScope])
 
   useEffect(() => {
     if (!lessonId) return

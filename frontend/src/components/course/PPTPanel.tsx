@@ -8,7 +8,7 @@ import { useJobsStore } from '../../stores/jobsStore'
 import { toast } from '../ui/Toast'
 import { getSocket } from '../../services/socket'
 import {
-  Loader2, Sparkles, Palette, RefreshCw, Download, Check,
+  Loader2, Sparkles, Palette, RefreshCw, Download, Check, Eye, Code2,
 } from 'lucide-react'
 
 export interface PaletteShape {
@@ -178,6 +178,7 @@ export default function PPTPanel({
   const t = useT()
   const [styleTags, setStyleTags] = useState<string[]>([])
   const [styleDesc, setStyleDesc] = useState('')
+  const [deckTheme, setDeckTheme] = useState('')
   const [analysisText, setAnalysisText] = useState('')
   const [candidates, setCandidates] = useState<StyleCandidate[]>([])
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null)
@@ -345,6 +346,7 @@ export default function PPTPanel({
       fd.append('palette_name', selected.name)
       fd.append('style', selected.layout_style || 'modern')
       fd.append('template', JSON.stringify(selected))
+      if (deckTheme) fd.append('deck_theme', deckTheme)
       const res = await api.post('/api/v1/course-tools/ppt', fd)
       const rid = res.data.result_id || res.data.id
       setPptId(rid)
@@ -365,6 +367,37 @@ export default function PPTPanel({
       const disp = res.headers['content-disposition'] || ''
       const match = disp.match(/filename\*?=(?:UTF-8'')?([^;\s]+)/i)
       const fname = match ? decodeURIComponent(match[1].replace(/"/g, '')) : 'ppt.pptx'
+      const a = document.createElement('a')
+      a.href = url
+      a.download = fname
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch {
+      setError(t('tools.download_failed'))
+    }
+  }
+
+  const previewHtml = async () => {
+    try {
+      const res = await api.get(`/api/v1/course-tools/ppt/${pptId}/preview`, { responseType: 'blob' })
+      const blob = new Blob([res.data], { type: 'text/html' })
+      const url = URL.createObjectURL(blob)
+      window.open(url, '_blank', 'noopener,noreferrer')
+      setTimeout(() => URL.revokeObjectURL(url), 60000)
+    } catch {
+      setError(t('tools.preview_failed'))
+    }
+  }
+
+  const downloadHtml = async () => {
+    try {
+      const res = await api.get(`/api/v1/course-tools/ppt/${pptId}/download-html`, { responseType: 'blob' })
+      const url = URL.createObjectURL(res.data)
+      const disp = res.headers['content-disposition'] || ''
+      const match = disp.match(/filename\*?=(?:UTF-8'')?([^;\s]+)/i)
+      const fname = match ? decodeURIComponent(match[1].replace(/"/g, '')) : 'ppt.html'
       const a = document.createElement('a')
       a.href = url
       a.download = fname
@@ -415,6 +448,22 @@ export default function PPTPanel({
           value={styleDesc}
           onChange={e => setStyleDesc(e.target.value)}
         />
+      </div>
+
+      <div>
+        <p className="text-sm text-gray-600 mb-2">{t('tools.deck_theme_label')}</p>
+        <select
+          className="w-full rounded-lg border border-gray-200 p-2.5 text-sm bg-white focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
+          value={deckTheme}
+          onChange={e => setDeckTheme(e.target.value)}
+        >
+          <option value="">{t('tools.deck_theme_default')}</option>
+          <option value="ink_classic">{t('tools.deck_theme_ink')}</option>
+          <option value="swiss_ikb">{t('tools.deck_theme_swiss')}</option>
+          <option value="ink_indigo">电子墨水 · 靛蓝瓷</option>
+          <option value="swiss_orange">瑞士风 · 安全橙</option>
+        </select>
+        <p className="text-[11px] text-gray-400 mt-1">{t('tools.deck_theme_hint')}</p>
       </div>
 
       <Button
@@ -551,9 +600,17 @@ export default function PPTPanel({
               </div>
             ))}
           </div>
-          <Button variant="secondary" onClick={download}>
-            <Download className="w-4 h-4 mr-2" />{t('tools.download_pptx')}
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={previewHtml}>
+              <Eye className="w-4 h-4 mr-2" />{t('tools.preview_html')}
+            </Button>
+            <Button variant="secondary" onClick={download}>
+              <Download className="w-4 h-4 mr-2" />{t('tools.download_pptx')}
+            </Button>
+            <Button variant="secondary" onClick={downloadHtml}>
+              <Code2 className="w-4 h-4 mr-2" />{t('tools.download_html')}
+            </Button>
+          </div>
         </div>
       )}
     </div>

@@ -5,13 +5,23 @@ import socketio
 
 from app.core.config import settings
 from app.core.database import engine, Base
-from app.api import auth, teaching_models, lessons, export, series, system, course_tools, template_fill, documents, admin
+from app.api import auth, teaching_models, lessons, export, series, system, course_tools, template_fill, documents, admin, semester_helper, textbooks, payments
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from app.core.database import init_db
+    from app.core.config import settings
+    from loguru import logger as _logger
+
+    if settings.APP_ENV == "production":
+        if settings.JWT_SECRET == "change-me-in-production":
+            raise RuntimeError(
+                "JWT_SECRET must be set to a strong value when APP_ENV=production"
+            )
+
+    from app.core.database import init_db, ensure_queue_target_id_width
     await init_db()
+    await ensure_queue_target_id_width()
     await _seed_teaching_models()
     await _seed_users()
 
@@ -20,8 +30,14 @@ async def lifespan(app: FastAPI):
 
     from app.tasks.job_handlers import register_all_handlers
     from app.tasks.queue_manager import start_workers, stop_workers, MAX_CONCURRENT_TASKS
+    from app.tasks.zhuke_task import sync_zhuke_queue_on_boot, recover_all_zhuke_exports
     register_all_handlers()
     await _cleanup_stale_tasks_on_boot()
+    await _zhuke_cleanup_boot_stale_jobs()
+    await _zhuke_requeue_running_orphans()
+    await recover_all_zhuke_exports()
+    await sync_zhuke_queue_on_boot()
+    await _zhuke_resurrect_orphans()
     await start_workers(MAX_CONCURRENT_TASKS)
 
     yield
@@ -66,6 +82,9 @@ app.include_router(course_tools.router, prefix="/api/v1")
 app.include_router(template_fill.router, prefix="/api/v1")
 app.include_router(documents.router, prefix="/api/v1")
 app.include_router(admin.router, prefix="/api/v1")
+app.include_router(semester_helper.router, prefix="/api/v1")
+app.include_router(textbooks.router, prefix="/api/v1")
+app.include_router(payments.router, prefix="/api/v1")
 
 
 @app.get("/")
@@ -75,12 +94,31 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    from app.core.database import check_db_connection
+    from app.services.zhuke_lesson import _find_soffice
+
+    soffice = _find_soffice()
+    db_ok = await check_db_connection()
+    return {
+        "status": "healthy" if db_ok else "degraded",
+        "db_ok": db_ok,
+        "libreoffice": bool(soffice),
+        "soffice_path": soffice,
+    }
 
 
 @sio.event
-async def connect(sid, environ):
-    pass
+async def connect(sid, environ, auth):
+    from app.core.security import decode_access_token
+
+    user_id = None
+    if isinstance(auth, dict):
+        token = auth.get("token")
+        if token:
+            payload = decode_access_token(str(token))
+            if payload:
+                user_id = str(payload.get("sub") or "")
+    await sio.save_session(sid, {"user_id": user_id})
 
 
 @sio.event
@@ -91,8 +129,12 @@ async def disconnect(sid):
 @sio.event
 async def join_lesson(sid, data):
     lesson_id = data.get("lesson_id") if isinstance(data, dict) else data
-    if lesson_id:
-        await sio.enter_room(sid, f"lesson_{lesson_id}")
+    if not lesson_id:
+        return
+    session = await sio.get_session(sid)
+    if not session or not session.get("user_id"):
+        return
+    await sio.enter_room(sid, f"lesson_{lesson_id}")
 
 
 @sio.event
@@ -106,8 +148,13 @@ async def leave_lesson(sid, data):
 async def join_user(sid, data):
     """订阅该用户的私有事件房间（course_tool_completed / failed / progress）"""
     user_id = data.get("user_id") if isinstance(data, dict) else data
-    if user_id:
-        await sio.enter_room(sid, f"user_{user_id}")
+    if not user_id:
+        return
+    session = await sio.get_session(sid)
+    authed = (session or {}).get("user_id")
+    if not authed or str(user_id) != str(authed):
+        return
+    await sio.enter_room(sid, f"user_{user_id}")
 
 
 @sio.event
@@ -143,12 +190,18 @@ async def _cleanup_stale_tasks_on_boot():
 
     try:
         async with async_session_maker() as session:
-            # 1) queue_jobs.running → queued（让 sweeper/worker 重新领取，不过重启之后 lease 也过期了）
+            # 1) queue_jobs.running → queued（珠科有专门 boot 逻辑，此处排除）
             await session.execute(text(
                 """
                 UPDATE queue_jobs
                 SET status='queued', worker_id=NULL, lease_until=NULL
                 WHERE status='running'
+                  AND kind NOT IN (
+                    'zhuke_lesson_single',
+                    'zhuke_lesson_relayout',
+                    'zhuke_lesson_batch'
+                  )
+                  AND (lease_until IS NULL OR lease_until < now())
                 """
             ))
 
@@ -188,11 +241,11 @@ async def _cleanup_stale_tasks_on_boot():
                 UPDATE course_tool_results
                 SET status='failed',
                     error_message=coalesce(error_message, '后端意外重启，本次生成被中断，请重新生成')
-                WHERE status IN ('queued','running')
+                WHERE status IN ('pending','queued','running')
                   AND NOT EXISTS (
                       SELECT 1 FROM queue_jobs qj
                        WHERE qj.target_id = course_tool_results.id
-                         AND qj.kind IN ('tool_outline','tool_ppt','tool_exercises','tool_practice')
+                         AND qj.kind IN ('tool_outline','tool_ppt','tool_exercises','tool_practice','tool_comic','tool_cards')
                          AND qj.status IN ('queued','running')
                   )
                 RETURNING id
@@ -212,12 +265,161 @@ async def _cleanup_stale_tasks_on_boot():
         _logger.warning(f"[startup cleanup] skipped due to error: {e}")
 
 
+async def _zhuke_resurrect_orphans():
+    """Mark zhuke generations whose worker was killed before completing as failed.
+
+    Heuristic: ``source_kind='zhuke_generation'`` rows still at ``queued`` or
+    ``running`` whose ``updated_at`` is older than 3 minutes (or NULL).
+    Boot sync runs first; this catches anything still orphaned after reload.
+    """
+    from loguru import logger as _logger
+    try:
+        from sqlalchemy import text as _sql_text
+        from app.core.database import async_session_maker
+        async with async_session_maker() as session:
+            res = await session.execute(
+                _sql_text(
+                    """
+                    UPDATE export_records
+                    SET status='failed',
+                        error_message=COALESCE(
+                            error_message,
+                            '后端重启时任务未完成，已自动标记失败（请重新生成）'
+                        ),
+                        updated_at=now()
+                    WHERE source_kind='zhuke_generation'
+                      AND status IN ('queued','running')
+                      AND deleted_at IS NULL
+                      AND (updated_at IS NULL OR updated_at < now() - interval '3 minutes')
+                      AND NOT EXISTS (
+                        SELECT 1 FROM queue_jobs qj
+                        WHERE qj.status IN ('queued', 'running')
+                          AND qj.kind IN (
+                            'zhuke_lesson_single',
+                            'zhuke_lesson_relayout',
+                            'zhuke_lesson_batch'
+                          )
+                          AND (
+                            qj.target_id = (export_records.params->>'result_id')
+                            OR qj.target_id LIKE (export_records.params->>'result_id') || '::%'
+                          )
+                      )
+                    RETURNING id
+                    """
+                )
+            )
+            ids = [r[0] for r in res.fetchall()]
+            await session.commit()
+            if ids:
+                _logger.info(
+                    f"[zhuke] startup sweep marked {len(ids)} stuck rows as failed: {ids[:5]}{'...' if len(ids) > 5 else ''}"
+                )
+    except Exception as e:
+        _logger.warning(f"[zhuke] startup orphan sweep failed: {e}")
+
+
+async def _zhuke_cleanup_boot_stale_jobs():
+    """Cancel ancient zhuke queue jobs at boot so they don't block new batches.
+
+    Old `zhuke_lesson_*` jobs that have been `queued` for >10 minutes are
+    almost always orphans from a previous crashed run. Leaving them in the
+    queue causes per-user concurrency saturation: a fresh user batch sits
+    behind 30+ stale jobs that never claim because their `params.json` has
+    long been pruned. We mark them all `cancelled` synchronously so workers
+    can move on. Safe because finalize/resurrect already moved any genuine
+    in-flight work to `failed` or `done`.
+    """
+    from loguru import logger as _logger
+    try:
+        from sqlalchemy import text as _sql_text
+        from app.core.database import async_session_maker
+        async with async_session_maker() as session:
+            res = await session.execute(
+                _sql_text(
+                    """
+                    UPDATE queue_jobs
+                    SET status='cancelled',
+                        finished_at=now(),
+                        lease_until=NULL,
+                        error=COALESCE(error, 'boot_stale_cleanup')
+                    WHERE kind IN (
+                        'zhuke_lesson_single',
+                        'zhuke_lesson_relayout',
+                        'zhuke_lesson_batch'
+                    )
+                      AND status = 'queued'
+                      AND created_at < now() - interval '10 minutes'
+                    RETURNING id
+                    """
+                )
+            )
+            ids = [r[0] for r in res.fetchall()]
+            await session.commit()
+            if ids:
+                _logger.info(
+                    f"[zhuke] boot cleanup cancelled {len(ids)} stale queued jobs"
+                )
+    except Exception as e:
+        _logger.warning(f"[zhuke] boot stale-job cleanup failed: {e}")
+
+
+async def _zhuke_requeue_running_orphans():
+    """Boot: requeue any zhuke job left in `running` by a previous process.
+
+    Workers have NOT started yet at this point, so any `status='running'`
+    zhuke row is guaranteed to be an orphan from a crash / reload / kill.
+    Flipping it back to `queued` lets the freshly-launched worker pool
+    claim it within seconds, instead of waiting for `lease_until` (default
+    600s) to expire so the sweeper would notice (+30s scan interval).
+
+    Without this, after every `uvicorn --reload` the frontend polls the
+    status forever as "running" while nobody is actually executing the job.
+    """
+    from loguru import logger as _logger
+    try:
+        from sqlalchemy import text as _sql_text
+        from app.core.database import async_session_maker
+        async with async_session_maker() as session:
+            res = await session.execute(
+                _sql_text(
+                    """
+                    UPDATE queue_jobs
+                    SET status='queued',
+                        worker_id=NULL,
+                        lease_until=NULL,
+                        error=COALESCE(error, 'boot_requeue_orphan')
+                    WHERE kind IN (
+                        'zhuke_lesson_single',
+                        'zhuke_lesson_relayout',
+                        'zhuke_lesson_batch'
+                    )
+                      AND status='running'
+                    RETURNING id
+                    """
+                )
+            )
+            ids = [r[0] for r in res.fetchall()]
+            await session.commit()
+            if ids:
+                _logger.info(
+                    f"[zhuke] boot requeued {len(ids)} orphan running jobs: "
+                    f"{ids[:5]}{'...' if len(ids) > 5 else ''}"
+                )
+    except Exception as e:
+        _logger.warning(f"[zhuke] boot requeue-running failed: {e}")
+
+
 async def _seed_users():
     import uuid as _uuid
     from app.core.database import async_session_maker
     from app.core.security import get_password_hash
     from app.models.user import User
     from sqlalchemy import select as _sel
+    from loguru import logger as _logger
+
+    if settings.APP_ENV == "production":
+        _logger.info("[startup] skipping seed user creation in production")
+        return
 
     async with async_session_maker() as session:
         for uname, pwd, level in SEED_USERS:

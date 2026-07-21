@@ -16,12 +16,19 @@ from loguru import logger
 
 from app.core.database import get_db, async_session_maker
 from app.core.config import settings
-from app.core.deps import get_current_active_user, require_not_limited, resolve_documents_owner
+from app.core.deps import get_current_active_user, require_not_limited, require_capability, resolve_documents_owner, require_export_payment
 from app.models.user import User
 from app.models.lesson import LessonPlan, LessonSeries
 from app.models.course_tool import CourseToolResult
+from app.services import ppt_skills as _ppt_skills
+from app.services import k12_skills as _k12_skills
+from app.services import teacher_standard as _teacher_standard
 
-router = APIRouter(prefix="/course-tools", tags=["课程工具"], dependencies=[Depends(require_not_limited)])
+router = APIRouter(
+    prefix="/course-tools",
+    tags=["课程工具"],
+    dependencies=[Depends(require_not_limited), Depends(require_capability("can_course_tools"))],
+)
 
 DOUBAO_PROVIDER = "doubao"
 ALLOWED_PROVIDERS = {"doubao", "qwen", "deepseek", "kimi", "spark", "openai"}
@@ -192,6 +199,7 @@ async def _resolve_source_context(
         "source_type": None,
         "source_id": None,
         "title": "",
+        "education_level": "k12",  # 无源/标准输入默认 K12
     }
     mode = (source_mode or "auto").strip().lower()
     if mode not in {"auto", "optimized", "draft", "original"}:
@@ -225,6 +233,7 @@ async def _resolve_source_context(
         out["title"] = series.title or ""
         out["source_type"] = "series"
         out["source_id"] = series_id
+        out["education_level"] = getattr(series, "education_level", None) or "k12"
         return out
 
     # 3) Lesson source
@@ -243,6 +252,7 @@ async def _resolve_source_context(
         out["title"] = lesson.title or ""
         out["source_type"] = "lesson"
         out["source_id"] = lesson_id
+        out["education_level"] = getattr(lesson, "education_level", None) or "k12"
         return out
 
     return out
@@ -446,7 +456,7 @@ PPT_SYSTEM = """你是专业 PPT 设计师。根据提供的课程内容 + 用�
   "subtitle": "副标题（可空）",
   "slides": [
     {
-      "layout": "title_slide | section_header | agenda | content | two_column | comparison | timeline | process_steps | quote | callout | stats | closing",
+      "layout": "title_slide | section_header | agenda | content | two_column | comparison | timeline | process_steps | stats | big_number | quadrant | checklist | definition | quote | callout | closing",
       "title": "页面标题",
       "subtitle": "副标题（title_slide / section_header / quote 用）",
       "bullets":       ["要点1","要点2","要点3"],                 // content / agenda / closing
@@ -456,6 +466,11 @@ PPT_SYSTEM = """你是专业 PPT 设计师。根据提供的课程内容 + 用�
       "right_title":   "右列小标题",                              // comparison
       "steps":         [{"name":"阶段1","desc":"描述"}, ...],     // timeline / process_steps
       "stats":         [{"value":"95%","label":"正确率"}, ...],   // stats
+      "big_number":    "42%",                                     // big_number
+      "big_label":     "一句话解读这个数字",                        // big_number
+      "quadrants":     [{"name":"象限名","desc":"描述"}, ...],     // quadrant: 恰好4个
+      "term":          "核心术语",                                 // definition
+      "definition":    "精准定义",                                 // definition
       "quote":         "引用原文",                                // quote
       "quote_author":  "作者/出处",                               // quote
       "callout":       "一句话重点强调",                           // callout
@@ -488,7 +503,7 @@ PPT_OUTLINE_SYSTEM = """你是资深 PPT 教学设计师，专门为中国中小
     {
       "index": 1,
       "section": "导入" | "概念" | "案例" | "练习" | "总结" 等章节归属,
-      "layout": "title_slide | section_header | agenda | content | two_column | comparison | timeline | process_steps | quote | callout | stats | closing",
+      "layout": "title_slide | section_header | agenda | content | two_column | comparison | timeline | process_steps | stats | big_number | quadrant | checklist | definition | quote | callout | closing",
       "page_title": "本页标题(8-20字)",
       "key_focus": "本页要讲清楚的核心点(20-40字, 写明这页要让学生带走什么)",
       "prev_link": "与上一页的衔接(0-20字, 第1页留空)",
@@ -524,6 +539,11 @@ PPT_PAGE_SYSTEM = """你是资深 PPT 教学设计师，正在为一节课的**�
   "right_title":   "右列小标题",                                 // comparison
   "steps":         [{"name":"阶段名","desc":"30-60字描述,要有动作或例子"}],  // timeline / process_steps
   "stats":         [{"value":"95%","label":"指标说明"}],         // stats
+  "big_number":    "42%",                                       // big_number: 震撼数字/占比
+  "big_label":     "一句话解读这个数字(15-30字)",                 // big_number
+  "quadrants":     [{"name":"象限名","desc":"20-40字"}],         // quadrant: 恰好4个
+  "term":          "核心术语",                                   // definition
+  "definition":    "精准定义(40-80字)",                          // definition
   "quote":         "引用原文",                                   // quote
   "quote_author":  "作者/出处",                                  // quote
   "callout":       "一句话重点(20-40字)",                        // callout
@@ -537,6 +557,27 @@ PPT_PAGE_SYSTEM = """你是资深 PPT 教学设计师，正在为一节课的**�
 3. content 类页面 bullets 给 3-5 条，每条 25-50 字，**禁止**只写名词短语。
 4. timeline / process_steps 的 steps 给 3-6 个，每个 desc 30-60 字、要有动作。
 5. 不要输出说明文字、不要输出 markdown、只输出 JSON。"""
+
+
+# ── 注入 20 个开源 PPT 方案蒸馏出的设计/创作 skills（见 app/services/ppt_skills.py）──
+# 增量拼接到既有 system prompt 末尾，全面提升生成质量，不改变输出范式。
+PPT_OUTLINE_SYSTEM = PPT_OUTLINE_SYSTEM + "\n\n" + _ppt_skills.outline_skills()
+PPT_PAGE_SYSTEM = PPT_PAGE_SYSTEM + "\n\n" + _ppt_skills.page_skills()
+PPT_SYSTEM = PPT_SYSTEM + "\n\n" + _ppt_skills.single_shot_skills()
+PPT_STYLE_ANALYZER_STREAM_SYSTEM = (
+    PPT_STYLE_ANALYZER_STREAM_SYSTEM + "\n\n" + _ppt_skills.style_skills()
+)
+PPT_STYLE_ANALYZER_SYSTEM = PPT_STYLE_ANALYZER_SYSTEM + "\n\n" + _ppt_skills.style_skills()
+
+# ── 再注入 guizang 网页 PPT 设计方法论（提示词借鉴，见 app/services/ppt_guizang_skills.py）──
+from app.services import ppt_guizang_skills as _ppt_guizang  # noqa: E402
+_GUIZANG = _ppt_guizang.guizang_skills()
+PPT_OUTLINE_SYSTEM = PPT_OUTLINE_SYSTEM + "\n\n" + _GUIZANG
+PPT_PAGE_SYSTEM = PPT_PAGE_SYSTEM + "\n\n" + _GUIZANG
+PPT_SYSTEM = PPT_SYSTEM + "\n\n" + _GUIZANG
+PPT_STYLE_ANALYZER_STREAM_SYSTEM = PPT_STYLE_ANALYZER_STREAM_SYSTEM + "\n\n" + _GUIZANG
+PPT_STYLE_ANALYZER_SYSTEM = PPT_STYLE_ANALYZER_SYSTEM + "\n\n" + _GUIZANG
+
 
 EXERCISE_SYSTEM = """你是教育评估专家。根据提供的教学内容生成习题。
 输出严格JSON格式（不要markdown代码块），结构：
@@ -579,6 +620,62 @@ PRACTICE_SYSTEM = """你是课堂教学设计专家。根据教学内容生成�
 }"""
 
 
+COMIC_SYSTEM = """你是知识漫画编剧。把给定的课程内容/主题改编成"知识漫画"的分镜脚本。
+输出严格 JSON（不要 markdown 代码块，只输出 JSON 本体），结构：
+{
+  "title": "漫画标题",
+  "summary": "一句话简介(20-40字)",
+  "pages": [
+    {
+      "page": 1,
+      "panels": [
+        {
+          "index": 1,
+          "scene": "画面描述(配图提示词, 20-40字, 说清人物/动作/场景/镜头)",
+          "narration": "旁白(0-40字, 可空)",
+          "dialogues": [ {"speaker": "角色名", "text": "对白(口语化, ≤30字)"} ]
+        }
+      ]
+    }
+  ]
+}
+
+硬性要求：
+1. 知识准确、循序渐进；用角色对话和画面把知识点讲清楚、讲生动。
+2. 分镜连贯，有起承转合；每格 scene 必须是"能照着画出来"的具体画面描述。
+3. 页数与每页格数贴合布局：cinematic/splash 每页 1-2 格大画面；standard 每页 3-4 格；dense 每页 5-6 格；webtoon 竖向连续 4-6 格。总页数 3-8 页。
+4. 对白口语化、贴合角色；旁白用于交代背景或点题。
+5. 适龄、准确、无偏见；不照抄教材原文，用自己的话与画面表达。
+6. 只输出 JSON 本体，不要解释、不要 markdown。"""
+
+
+CARDS_SYSTEM = """你是英语学习卡片设计师。根据提供的课文/主题，抽取核心词汇/短语，做成学习卡片。
+输出严格 JSON（不要 markdown 代码块，只输出 JSON 本体），结构：
+{
+  "title": "卡片集标题",
+  "cards": [
+    {
+      "word": "单词或短语",
+      "phonetic": "音标(不带斜杠, 如 ˈæpl)",
+      "pos": "词性(n./v./adj./phrase 等)",
+      "meaning_en": "英文释义(简洁)",
+      "meaning_zh": "中文释义",
+      "example": "地道英文例句",
+      "example_zh": "例句中文翻译",
+      "mnemonic": "记忆法/词根词缀/搭配(实用, 20-40字)",
+      "tag": "分类标签(如 主题词/高频/易错)"
+    }
+  ]
+}
+
+硬性要求：
+1. 词/短语与音标准确规范；例句地道、贴合学段、能体现该词用法。
+2. 中文释义准确；记忆法要实用（词根词缀、联想、常见搭配、易混辨析）。
+3. 卡片数量贴合入参 count（默认 8-12 张）；优先本课/本主题的核心与高频词。
+4. 适龄、无偏见；不照抄教材原文，例句自拟。
+5. 只输出 JSON 本体，不要解释、不要 markdown。"""
+
+
 def _parse_json_response(text: str) -> dict:
     t = text.strip()
     if t.startswith("```"):
@@ -596,7 +693,7 @@ _PPT_PAGE_CONCURRENCY = 8  # 单次任务里逐页深度生成的并发上限，
 
 async def _generate_ppt_outline(
     *, ai, subject: str, grade_level: str, region: str,
-    topic: str, source: str, template_meta: dict,
+    topic: str, source: str, template_meta: dict, k12: bool = False,
 ) -> dict:
     """Stage A: 让豆包出 15-25 页的元数据大纲（不展开正文）。"""
     style_hint = (
@@ -611,9 +708,11 @@ async def _generate_ppt_outline(
     )
     if source:
         prompt += f"\n参考教学内容（节选）：\n{source[:6000]}\n"
+    _sys = PPT_OUTLINE_SYSTEM + "\n\n" + _teacher_standard.standard() + (
+        "\n\n" + _k12_skills.course_tool_skills() if k12 else "")
     raw = await ai.generate(
         prompt, provider_name=DOUBAO_PROVIDER,
-        max_tokens=2500, system_message=PPT_OUTLINE_SYSTEM,
+        max_tokens=2500, system_message=_sys,
     )
     return _parse_json_response(raw)
 
@@ -621,7 +720,7 @@ async def _generate_ppt_outline(
 async def _generate_ppt_page(
     *, ai, page_meta: dict, outline: dict, neighbors: dict,
     subject: str, grade_level: str, topic: str, source_excerpt: str,
-    template_meta: dict, sem: asyncio.Semaphore,
+    template_meta: dict, sem: asyncio.Semaphore, k12: bool = False,
 ) -> dict:
     """Stage B: 并发深度生成单页，吃 outline 上下文 + 前后页提示，确保连贯。
 
@@ -647,9 +746,11 @@ async def _generate_ppt_page(
             ctx += f"\n\n相关参考内容片段：\n{source_excerpt[:1500]}\n"
 
         try:
+            _sys = PPT_PAGE_SYSTEM + "\n\n" + _teacher_standard.standard() + (
+                "\n\n" + _k12_skills.course_tool_skills() if k12 else "")
             raw = await ai.generate(
                 ctx, provider_name=DOUBAO_PROVIDER,
-                max_tokens=1500, system_message=PPT_PAGE_SYSTEM,
+                max_tokens=1500, system_message=_sys,
             )
             page = _parse_json_response(raw)
         except Exception as e:
@@ -704,7 +805,14 @@ async def _mark_running(_db: Optional[AsyncSession], ci: CourseToolResult) -> No
             return
         row.status = "running"
         await s.commit()
-        ci.status = row.status
+        ci.status = "running"
+
+    # 通知前端任务已进入"生成中"，避免全程显示"排队中"
+    await _emit_tool_event(
+        "course_tool_running",
+        ci.user_id,
+        {"result_id": ci.id, "tool_type": ci.tool_type, "status": "running"},
+    )
 
 
 async def _mark_completed(
@@ -770,6 +878,14 @@ async def _mark_failed(_db: Optional[AsyncSession], ci: CourseToolResult, err: s
     )
 
 
+def _agent_tool_sys(base: str, source_meta: Optional[dict]) -> str:
+    """课程工具 system prompt：始终并入通用教学标准；K12 来源再并入 k12 指南。"""
+    out = base + "\n\n" + _teacher_standard.standard()
+    if _k12_skills.is_k12((source_meta or {}).get("education_level")):
+        out += "\n\n" + _k12_skills.course_tool_skills()
+    return out
+
+
 def _merge_source_meta(result: dict, source_meta: Optional[dict]) -> dict:
     """Mirror the previous _save() behavior: attach _source metadata inside the result."""
     if source_meta and isinstance(result, dict):
@@ -802,7 +918,7 @@ async def _do_outline(db: AsyncSession, ci: CourseToolResult) -> None:
         prompt += f"参考教学内容：\n{source}\n"
 
     ai = _get_ai()
-    raw = await ai.generate(prompt, provider_name=DOUBAO_PROVIDER, max_tokens=6000, system_message=OUTLINE_SYSTEM)
+    raw = await ai.generate(prompt, provider_name=DOUBAO_PROVIDER, max_tokens=6000, system_message=_agent_tool_sys(OUTLINE_SYSTEM, source_meta))
     data = _parse_json_response(raw)
     data = _merge_source_meta(data, source_meta)
     await _mark_completed(db, ci, data)
@@ -837,6 +953,7 @@ async def _do_ppt(db: AsyncSession, ci: CourseToolResult) -> None:
     template_meta.setdefault("cover_style", "centered")
     template_meta.setdefault("name", p.get("palette_name") or style)
     source_meta = p.get("_source_meta") or {}
+    k12 = _k12_skills.is_k12(source_meta.get("education_level"))
 
     ai = _get_ai()
     slide_data: dict
@@ -848,7 +965,7 @@ async def _do_ppt(db: AsyncSession, ci: CourseToolResult) -> None:
     try:
         outline = await _generate_ppt_outline(
             ai=ai, subject=subject, grade_level=grade_level, region=region,
-            topic=topic, source=source, template_meta=template_meta,
+            topic=topic, source=source, template_meta=template_meta, k12=k12,
         )
         pages_meta = list(outline.get("pages") or [])
         logger.info(
@@ -870,13 +987,26 @@ async def _do_ppt(db: AsyncSession, ci: CourseToolResult) -> None:
                 ai=ai, page_meta=meta, outline=outline,
                 neighbors={"prev": prev_t, "next": next_t},
                 subject=subject, grade_level=grade_level, topic=topic,
-                source_excerpt=source, template_meta=template_meta, sem=sem,
+                source_excerpt=source, template_meta=template_meta, sem=sem, k12=k12,
             )
 
-        pages = await asyncio.gather(
+        pages_raw = await asyncio.gather(
             *[_one(i, m) for i, m in enumerate(pages_meta)],
-            return_exceptions=False,
+            return_exceptions=True,
         )
+        pages = []
+        for i, item in enumerate(pages_raw):
+            if isinstance(item, BaseException):
+                logger.warning(f"[ppt] page {i} failed: {item}")
+                meta = pages_meta[i]
+                pages.append({
+                    "page_title": meta.get("page_title") or f"第{i + 1}页",
+                    "layout": meta.get("layout") or "title_content",
+                    "content": ["（本页生成失败，请重新生成 PPT）"],
+                    "notes": "",
+                })
+            else:
+                pages.append(item)
         slide_data = {
             "title":    outline.get("title") or topic or "课程演示",
             "subtitle": outline.get("subtitle") or "",
@@ -901,7 +1031,7 @@ async def _do_ppt(db: AsyncSession, ci: CourseToolResult) -> None:
             prompt += f"参考内容：\n{source[:8000]}\n"
         raw = await ai.generate(
             prompt, provider_name=DOUBAO_PROVIDER,
-            max_tokens=8000, system_message=PPT_SYSTEM,
+            max_tokens=8000, system_message=_agent_tool_sys(PPT_SYSTEM, source_meta),
         )
         slide_data = _parse_json_response(raw)
 
@@ -944,7 +1074,7 @@ async def _do_exercises(db: AsyncSession, ci: CourseToolResult) -> None:
     )
 
     ai = _get_ai()
-    raw = await ai.generate(prompt, provider_name=chosen_provider, max_tokens=8000, system_message=EXERCISE_SYSTEM)
+    raw = await ai.generate(prompt, provider_name=chosen_provider, max_tokens=8000, system_message=_agent_tool_sys(EXERCISE_SYSTEM, source_meta))
     data = _parse_json_response(raw)
     data = _merge_source_meta(data, source_meta)
     await _mark_completed(db, ci, data)
@@ -968,8 +1098,138 @@ async def _do_practice(db: AsyncSession, ci: CourseToolResult) -> None:
     )
 
     ai = _get_ai()
-    raw = await ai.generate(prompt, provider_name=chosen_provider, max_tokens=6000, system_message=PRACTICE_SYSTEM)
+    raw = await ai.generate(prompt, provider_name=chosen_provider, max_tokens=6000, system_message=_agent_tool_sys(PRACTICE_SYSTEM, source_meta))
     data = _parse_json_response(raw)
+    data = _merge_source_meta(data, source_meta)
+    await _mark_completed(db, ci, data)
+
+
+def _images_enabled() -> bool:
+    """是否开启豆包文生图配图（需配置 DOUBAO_IMAGE_MODEL）。"""
+    return bool(getattr(settings, "DOUBAO_IMAGE_MODEL", ""))
+
+
+async def _gen_images_concurrent(prompts: list, *, size: str = "1024x1024", limit: int = 3) -> list:
+    """按 prompts 顺序并发生成图片，返回等长的 base64 data URL 列表（失败项为 ""）。
+
+    并发上限 limit；任何单张失败都不影响其它，也不会抛出。
+    """
+    ai = _get_ai()
+    sem = asyncio.Semaphore(max(1, limit))
+
+    async def _one(pr: str) -> str:
+        if not pr:
+            return ""
+        async with sem:
+            try:
+                return await ai.generate_image(pr, provider_name=DOUBAO_PROVIDER, size=size)
+            except Exception:
+                return ""
+
+    return await asyncio.gather(*[_one(p) for p in prompts])
+
+
+async def _do_comic(db: AsyncSession, ci: CourseToolResult) -> None:
+    """知识漫画：AI 出分镜脚本 JSON（可选豆包配图，渲染由预览端点完成）。"""
+    p = ci.params or {}
+    subject = p.get("subject") or ""
+    grade_level = p.get("grade_level") or ""
+    topic = p.get("topic") or ""
+    source = p.get("_resolved_source") or ""
+    art = p.get("art") or "ligne-claire"
+    tone = p.get("tone") or "neutral"
+    layout = p.get("layout") or "standard"
+    lang = p.get("lang") or "zh"
+    with_images = p.get("with_images", True)
+    source_meta = p.get("_source_meta") or {}
+
+    prompt = (
+        f"请把以下内容改编成知识漫画分镜脚本。\n"
+        f"学科：{subject or '-'}，年级：{grade_level or '-'}，主题：{topic or '-'}\n"
+        f"画风：{art}，基调：{tone}，布局：{layout}，语言：{lang}\n\n"
+    )
+    if source:
+        prompt += f"参考教学内容：\n{source[:6000]}\n"
+
+    ai = _get_ai()
+    raw = await ai.generate(
+        prompt, provider_name=DOUBAO_PROVIDER, max_tokens=6000,
+        system_message=_agent_tool_sys(COMIC_SYSTEM, source_meta),
+    )
+    data = _parse_json_response(raw)
+
+    # 可选：豆包文生图为每格生成画面（base64 内嵌）；失败/未配置则静默降级为占位描述
+    if with_images and _images_enabled():
+        _art_style = {
+            "ligne-claire": "clean ligne claire comic style",
+            "manga": "black-and-white manga style",
+            "realistic": "semi-realistic illustration",
+            "ink-brush": "chinese ink-brush painting style",
+            "chalk": "chalkboard drawing style",
+        }.get(art, "comic illustration")
+        panels_flat = []
+        for pg in (data.get("pages") or []):
+            for pn in (pg.get("panels") or []):
+                if isinstance(pn, dict) and pn.get("scene"):
+                    panels_flat.append(pn)
+        prompts = [
+            f'{_art_style}, single comic panel, no speech bubbles, no text: {pn.get("scene")}'
+            for pn in panels_flat
+        ]
+        imgs = await _gen_images_concurrent(prompts, size="1024x1024", limit=3)
+        for pn, img in zip(panels_flat, imgs):
+            if img:
+                pn["image_b64"] = img
+
+    data = _merge_source_meta(data, source_meta)
+    await _mark_completed(db, ci, data)
+
+
+async def _do_cards(db: AsyncSession, ci: CourseToolResult) -> None:
+    """英语学习卡片：AI 出卡片 JSON（渲染由预览端点完成）。"""
+    p = ci.params or {}
+    subject = p.get("subject") or ""
+    grade_level = p.get("grade_level") or ""
+    topic = p.get("topic") or ""
+    source = p.get("_resolved_source") or ""
+    theme = p.get("theme") or "minimal"
+    aspect = p.get("aspect") or "3:4"
+    count = int(p.get("count") or 10)
+    lang = p.get("lang") or "en"
+    with_images = p.get("with_images", True)
+    source_meta = p.get("_source_meta") or {}
+
+    prompt = (
+        f"请从以下内容抽取核心词汇/短语做成英语学习卡片。\n"
+        f"学科：{subject or '英语'}，年级：{grade_level or '-'}，主题：{topic or '-'}\n"
+        f"卡片数量：约 {count} 张；主题风格：{theme}；语言：{lang}\n\n"
+    )
+    if source:
+        prompt += f"参考教学内容：\n{source[:6000]}\n"
+
+    ai = _get_ai()
+    raw = await ai.generate(
+        prompt, provider_name=DOUBAO_PROVIDER, max_tokens=6000,
+        system_message=_agent_tool_sys(CARDS_SYSTEM, source_meta),
+    )
+    data = _parse_json_response(raw)
+
+    # 可选：豆包文生图为每张卡片配一张插图（base64 内嵌）；失败/未配置则静默降级为纯文字
+    if with_images and _images_enabled():
+        cards = [c for c in (data.get("cards") or []) if isinstance(c, dict) and c.get("word")]
+        prompts = [
+            (
+                f'flat vector illustration of "{c.get("word")}"'
+                + (f' ({c.get("meaning_en")})' if c.get("meaning_en") else "")
+                + ", minimal, cute, educational flashcard, plain white background, no text, no letters"
+            )
+            for c in cards
+        ]
+        imgs = await _gen_images_concurrent(prompts, size="1024x1024", limit=3)
+        for c, img in zip(cards, imgs):
+            if img:
+                c["image_b64"] = img
+
     data = _merge_source_meta(data, source_meta)
     await _mark_completed(db, ci, data)
 
@@ -1037,7 +1297,7 @@ async def generate_outline(
     )
 
 
-@router.get("/outline/{result_id}/download")
+@router.get("/outline/{result_id}/download", dependencies=[Depends(require_export_payment)])
 async def download_outline(
     result_id: str,
     for_user_id: Optional[str] = Query(None, description="管理员：下载指定用户的记录"),
@@ -1079,7 +1339,17 @@ async def download_outline(
     buf = BytesIO()
     doc.save(buf)
     buf.seek(0)
-    return Response(content=buf.getvalue(),
+    payload = buf.getvalue()
+    file_name = f"{data.get('title', '大纲')}.docx"
+    from app.api.export import _record_export_safely
+    await _record_export_safely(
+        db, owner.id,
+        lesson_plan_id=getattr(item, "lesson_id", None),
+        format="docx", file_name=file_name, file_size=len(payload),
+        source_kind="course_tool",
+        params={"result_id": result_id, "tool_type": "outline"},
+    )
+    return Response(content=payload,
                     media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     headers={"Content-Disposition": _cd(data.get("title", "大纲"), "docx")})
 
@@ -1403,6 +1673,7 @@ async def generate_ppt(
     palette: str = Form(""),
     palette_name: str = Form(""),
     template: str = Form(""),
+    deck_theme: str = Form(""),
     subject: str = Form(""),
     grade_level: str = Form(""),
     region: str = Form("mainland"),
@@ -1494,6 +1765,8 @@ async def generate_ppt(
         "_resolved_source": source,
         "_source_meta": {**src, "mode": source_mode},
     }
+    if deck_theme:
+        params["deck_theme"] = deck_theme
     if palette_dict:
         params["palette"] = palette_dict
         params["palette_name"] = palette_name
@@ -1518,7 +1791,7 @@ async def generate_ppt(
     )
 
 
-@router.get("/ppt/{result_id}/download")
+@router.get("/ppt/{result_id}/download", dependencies=[Depends(require_export_payment)])
 async def download_ppt(
     result_id: str,
     for_user_id: Optional[str] = Query(None, description="管理员：下载指定用户的记录"),
@@ -1532,9 +1805,303 @@ async def download_ppt(
     with open(item.file_path, "rb") as f:
         data = f.read()
     title = (item.result or {}).get("title", "PPT")
+    from app.api.export import _record_export_safely
+    await _record_export_safely(
+        db, owner.id,
+        lesson_plan_id=getattr(item, "lesson_id", None),
+        format="pptx", file_name=f"{title}.pptx", file_size=len(data),
+        source_kind="course_tool",
+        params={"result_id": result_id, "tool_type": "ppt"},
+    )
     return Response(content=data,
                     media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                     headers={"Content-Disposition": _cd(title, "pptx")})
+
+
+def _build_ppt_html(item: CourseToolResult) -> str:
+    """Render the saved slide_data into a self-contained HTML deck."""
+    data = item.result or {}
+    if not (data.get("slides") or []):
+        raise HTTPException(404, "PPT 尚未生成完成或无可预览内容")
+    params = item.params or {}
+    from app.services.ppt_html_service import build_html
+    return build_html(
+        data,
+        style=params.get("style") or "modern",
+        palette=params.get("palette"),
+        template=params.get("template"),
+        deck_theme=params.get("deck_theme"),
+    )
+
+
+@router.get("/ppt/{result_id}/preview")
+async def preview_ppt_html(
+    result_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：预览指定用户的记录"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """在线预览：实时把 slide_data 渲染成网页版 PPT（内联展示，非下载）。"""
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    item = await _get_result(result_id, owner.id, db)
+    html_str = _build_ppt_html(item)
+    return Response(content=html_str, media_type="text/html; charset=utf-8")
+
+
+@router.get("/ppt/{result_id}/download-html", dependencies=[Depends(require_export_payment)])
+async def download_ppt_html(
+    result_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：下载指定用户的记录"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """下载网页版 PPT：单文件、可离线打开的 .html。"""
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    item = await _get_result(result_id, owner.id, db)
+    html_str = _build_ppt_html(item)
+    payload = html_str.encode("utf-8")
+    title = (item.result or {}).get("title", "PPT")
+    from app.api.export import _record_export_safely
+    await _record_export_safely(
+        db, owner.id,
+        lesson_plan_id=getattr(item, "lesson_id", None),
+        format="html", file_name=f"{title}.html", file_size=len(payload),
+        source_kind="course_tool",
+        params={"result_id": result_id, "tool_type": "ppt", "variant": "html"},
+    )
+    return Response(content=payload,
+                    media_type="text/html; charset=utf-8",
+                    headers={"Content-Disposition": _cd(title, "html")})
+
+
+# ── 2b. Comic 知识漫画 ─────────────────────────────────────────────────
+
+def _build_comic_html_from_item(item: CourseToolResult) -> str:
+    data = item.result or {}
+    if not (data.get("pages") or []):
+        raise HTTPException(404, "漫画尚未生成完成或无可预览内容")
+    p = item.params or {}
+    from app.services.comic_html_service import build_comic_html
+    return build_comic_html(
+        data,
+        art=p.get("art") or "ligne-claire",
+        tone=p.get("tone") or "neutral",
+        layout=p.get("layout") or "standard",
+        aspect=p.get("aspect") or "3:4",
+        lang=p.get("lang") or "zh",
+    )
+
+
+@router.post("/comic")
+async def generate_comic(
+    art: str = Form("ligne-claire"),
+    tone: str = Form("neutral"),
+    layout: str = Form("standard"),
+    aspect: str = Form("3:4"),
+    lang: str = Form("zh"),
+    with_images: bool = Form(True),
+    subject: str = Form(""),
+    grade_level: str = Form(""),
+    region: str = Form("mainland"),
+    topic: str = Form(""),
+    content: str = Form(""),
+    lesson_id: Optional[str] = Form(None),
+    outline_id: Optional[str] = Form(None),
+    series_id: Optional[str] = Form(None),
+    ppt_id: Optional[str] = Form(None),
+    exercises_id: Optional[str] = Form(None),
+    practice_id: Optional[str] = Form(None),
+    source_mode: str = Form("auto"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    src = await _resolve_source_context(
+        db, current_user,
+        lesson_id=lesson_id, series_id=series_id, outline_id=outline_id,
+        ppt_id=ppt_id, exercises_id=exercises_id, practice_id=practice_id,
+        source_mode=source_mode,
+    )
+    subject = subject or src["subject"]
+    grade_level = grade_level or src["grade_level"]
+    region = region or src["region"] or "mainland"
+    topic = topic or src["topic"]
+    source = content or src["text"]
+    if not source and not topic:
+        raise HTTPException(400, "请提供内容来源")
+
+    params = {
+        "art": art, "tone": tone, "layout": layout, "aspect": aspect, "lang": lang,
+        "with_images": with_images,
+        "subject": subject, "grade_level": grade_level, "region": region, "topic": topic,
+        "series_id": series_id, "outline_id": outline_id, "ppt_id": ppt_id,
+        "exercises_id": exercises_id, "practice_id": practice_id, "source_mode": source_mode,
+        "_resolved_source": source,
+        "_source_meta": {**src, "mode": source_mode},
+    }
+    placeholder_title = topic or src.get("title") or "知识漫画"
+    result_id = await _create_pending(
+        db, user_id=current_user.id, lesson_id=lesson_id,
+        tool_type="comic", params=params,
+        initial_result={"title": placeholder_title},
+    )
+    return await _enqueue_tool(
+        db=db, user_id=current_user.id,
+        kind="tool_comic", result_id=result_id, tool_type="comic",
+        title=placeholder_title,
+    )
+
+
+@router.get("/comic/{result_id}/preview")
+async def preview_comic(
+    result_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：预览指定用户的记录"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """在线预览：实时把分镜脚本渲染成网页版知识漫画。"""
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    item = await _get_result(result_id, owner.id, db)
+    return Response(content=_build_comic_html_from_item(item),
+                    media_type="text/html; charset=utf-8")
+
+
+@router.get("/comic/{result_id}/download-html", dependencies=[Depends(require_export_payment)])
+async def download_comic_html(
+    result_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：下载指定用户的记录"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """下载网页版知识漫画：单文件、可离线打开的 .html。"""
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    item = await _get_result(result_id, owner.id, db)
+    payload = _build_comic_html_from_item(item).encode("utf-8")
+    title = (item.result or {}).get("title", "知识漫画")
+    from app.api.export import _record_export_safely
+    await _record_export_safely(
+        db, owner.id,
+        lesson_plan_id=getattr(item, "lesson_id", None),
+        format="html", file_name=f"{title}.html", file_size=len(payload),
+        source_kind="course_tool",
+        params={"result_id": result_id, "tool_type": "comic", "variant": "html"},
+    )
+    return Response(content=payload,
+                    media_type="text/html; charset=utf-8",
+                    headers={"Content-Disposition": _cd(title, "html")})
+
+
+# ── 2c. Cards 英语学习卡片 ─────────────────────────────────────────────
+
+def _build_cards_html_from_item(item: CourseToolResult) -> str:
+    data = item.result or {}
+    if not (data.get("cards") or []):
+        raise HTTPException(404, "卡片尚未生成完成或无可预览内容")
+    p = item.params or {}
+    from app.services.cards_html_service import build_cards_html
+    return build_cards_html(
+        data,
+        theme=p.get("theme") or "minimal",
+        aspect=p.get("aspect") or "3:4",
+        lang=p.get("lang") or "en",
+    )
+
+
+@router.post("/cards")
+async def generate_cards(
+    theme: str = Form("minimal"),
+    aspect: str = Form("3:4"),
+    count: int = Form(10),
+    level: str = Form(""),
+    lang: str = Form("en"),
+    with_images: bool = Form(True),
+    subject: str = Form(""),
+    grade_level: str = Form(""),
+    region: str = Form("mainland"),
+    topic: str = Form(""),
+    content: str = Form(""),
+    lesson_id: Optional[str] = Form(None),
+    outline_id: Optional[str] = Form(None),
+    series_id: Optional[str] = Form(None),
+    ppt_id: Optional[str] = Form(None),
+    exercises_id: Optional[str] = Form(None),
+    practice_id: Optional[str] = Form(None),
+    source_mode: str = Form("auto"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    src = await _resolve_source_context(
+        db, current_user,
+        lesson_id=lesson_id, series_id=series_id, outline_id=outline_id,
+        ppt_id=ppt_id, exercises_id=exercises_id, practice_id=practice_id,
+        source_mode=source_mode,
+    )
+    subject = subject or src["subject"]
+    grade_level = grade_level or src["grade_level"]
+    region = region or src["region"] or "mainland"
+    topic = topic or src["topic"]
+    source = content or src["text"]
+    if not source and not topic:
+        raise HTTPException(400, "请提供内容来源")
+
+    params = {
+        "theme": theme, "aspect": aspect, "count": count, "level": level, "lang": lang,
+        "with_images": with_images,
+        "subject": subject, "grade_level": grade_level, "region": region, "topic": topic,
+        "series_id": series_id, "outline_id": outline_id, "ppt_id": ppt_id,
+        "exercises_id": exercises_id, "practice_id": practice_id, "source_mode": source_mode,
+        "_resolved_source": source,
+        "_source_meta": {**src, "mode": source_mode},
+    }
+    placeholder_title = topic or src.get("title") or "英语学习卡片"
+    result_id = await _create_pending(
+        db, user_id=current_user.id, lesson_id=lesson_id,
+        tool_type="cards", params=params,
+        initial_result={"title": placeholder_title},
+    )
+    return await _enqueue_tool(
+        db=db, user_id=current_user.id,
+        kind="tool_cards", result_id=result_id, tool_type="cards",
+        title=placeholder_title,
+    )
+
+
+@router.get("/cards/{result_id}/preview")
+async def preview_cards(
+    result_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：预览指定用户的记录"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """在线预览：实时把卡片脚本渲染成网页版学习卡片。"""
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    item = await _get_result(result_id, owner.id, db)
+    return Response(content=_build_cards_html_from_item(item),
+                    media_type="text/html; charset=utf-8")
+
+
+@router.get("/cards/{result_id}/download-html", dependencies=[Depends(require_export_payment)])
+async def download_cards_html(
+    result_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：下载指定用户的记录"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """下载网页版学习卡片：单文件、可离线打开的 .html。"""
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    item = await _get_result(result_id, owner.id, db)
+    payload = _build_cards_html_from_item(item).encode("utf-8")
+    title = (item.result or {}).get("title", "英语学习卡片")
+    from app.api.export import _record_export_safely
+    await _record_export_safely(
+        db, owner.id,
+        lesson_plan_id=getattr(item, "lesson_id", None),
+        format="html", file_name=f"{title}.html", file_size=len(payload),
+        source_kind="course_tool",
+        params={"result_id": result_id, "tool_type": "cards", "variant": "html"},
+    )
+    return Response(content=payload,
+                    media_type="text/html; charset=utf-8",
+                    headers={"Content-Disposition": _cd(title, "html")})
 
 
 # ── 3. Exercises ─────────────────────────────────────────────────────
@@ -1603,7 +2170,7 @@ async def generate_exercises(
     return payload
 
 
-@router.get("/exercises/{result_id}/download")
+@router.get("/exercises/{result_id}/download", dependencies=[Depends(require_export_payment)])
 async def download_exercises(
     result_id: str,
     version: str = "student",
@@ -1640,7 +2207,16 @@ async def download_exercises(
     buf = BytesIO()
     doc.save(buf)
     buf.seek(0)
-    return Response(content=buf.getvalue(),
+    payload = buf.getvalue()
+    from app.api.export import _record_export_safely
+    await _record_export_safely(
+        db, owner.id,
+        lesson_plan_id=getattr(item, "lesson_id", None),
+        format="docx", file_name=f"{title}.docx", file_size=len(payload),
+        source_kind="course_tool",
+        params={"result_id": result_id, "tool_type": "exercises", "version": version},
+    )
+    return Response(content=payload,
                     media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     headers={"Content-Disposition": _cd(title, "docx")})
 
@@ -1771,7 +2347,7 @@ async def merge_practice_to_ppt(
     return {"id": item.id, "message": "合并成功"}
 
 
-@router.get("/practice/{result_id}/download")
+@router.get("/practice/{result_id}/download", dependencies=[Depends(require_export_payment)])
 async def download_practice(
     result_id: str,
     for_user_id: Optional[str] = Query(None, description="管理员：下载指定用户的记录"),
@@ -1816,7 +2392,16 @@ async def download_practice(
     buf = BytesIO()
     doc.save(buf)
     buf.seek(0)
-    return Response(content=buf.getvalue(),
+    payload = buf.getvalue()
+    from app.api.export import _record_export_safely
+    await _record_export_safely(
+        db, owner.id,
+        lesson_plan_id=getattr(item, "lesson_id", None),
+        format="docx", file_name=f"{data.get('title', '课上练习')}.docx", file_size=len(payload),
+        source_kind="course_tool",
+        params={"result_id": result_id, "tool_type": "practice"},
+    )
+    return Response(content=payload,
                     media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     headers={"Content-Disposition": _cd(data.get("title", "课上练习"), "docx")})
 

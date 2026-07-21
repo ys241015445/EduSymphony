@@ -196,6 +196,103 @@ class AIService:
         return response.choices[0].message.content
 
     # ──────────────────────────────────────────────────────────────
+    # 视觉 / 多模态（立体几何图片入口用）— 默认 qwen-vl-max
+    # ──────────────────────────────────────────────────────────────
+
+    async def generate_vision(
+        self,
+        prompt: str,
+        images: List[str],
+        *,
+        provider_name: str = "qwen",
+        model: Optional[str] = None,
+        system_message: Optional[str] = None,
+        temperature: float = 0.2,
+        max_tokens: int = 1500,
+    ) -> str:
+        """多模态调用：prompt + 一张或多张图片（`images` 为 data URL 或 http URL）。
+
+        默认走 qwen 的 DashScope 兼容通道 + `qwen-vl-max`。未配置 qwen 时回退到
+        provider_order 里第一个可用 provider（仍用其视觉能力，可能失败由调用方兜底）。
+        """
+        provider = self.providers.get(provider_name) or (
+            self.providers[self.provider_order[0]] if self.provider_order else None
+        )
+        if provider is None:
+            raise Exception("没有可用的 AI provider（视觉）")
+
+        vl_model = model
+        if vl_model is None:
+            vl_model = settings.QWEN_VL_MODEL if provider.name == "qwen" else provider.model
+
+        content: List[dict] = [{"type": "text", "text": prompt}]
+        for url in images:
+            if url:
+                content.append({"type": "image_url", "image_url": {"url": url}})
+
+        messages: List[dict] = []
+        if system_message:
+            messages.append({"role": "system", "content": system_message})
+        messages.append({"role": "user", "content": content})
+
+        response = await provider.client.chat.completions.create(
+            model=vl_model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return response.choices[0].message.content
+
+    # ──────────────────────────────────────────────────────────────
+    # 文生图（英语卡片 / 知识漫画配图用）— 默认豆包方舟 Seedream
+    # ──────────────────────────────────────────────────────────────
+
+    async def generate_image(
+        self,
+        prompt: str,
+        *,
+        provider_name: str = "doubao",
+        model: Optional[str] = None,
+        size: str = "1024x1024",
+    ) -> str:
+        """文生图：返回一张图片的 base64 data URL；任何失败/未配置都返回 ""（调用方降级为纯文字）。
+
+        走豆包方舟 OpenAI 兼容 `/images/generations`（Seedream 文生图）。
+        模型取 `DOUBAO_IMAGE_MODEL`；留空或 provider 不可用 → 直接降级。
+        """
+        provider = self.providers.get(provider_name)
+        img_model = model or settings.DOUBAO_IMAGE_MODEL
+        if provider is None or not img_model:
+            return ""
+        try:
+            resp = await provider.client.images.generate(
+                model=img_model,
+                prompt=prompt,
+                size=size,
+                response_format="b64_json",
+            )
+            item = resp.data[0] if getattr(resp, "data", None) else None
+            if item is None:
+                return ""
+            b64 = getattr(item, "b64_json", None)
+            if b64:
+                return f"data:image/png;base64,{b64}"
+            # 兼容只返回 url 的模型：拉取后自行 base64
+            url = getattr(item, "url", None)
+            if url:
+                import base64 as _b64
+                async with httpx.AsyncClient(timeout=30) as hc:
+                    r = await hc.get(url)
+                    r.raise_for_status()
+                    ct = r.headers.get("content-type", "image/png")
+                    enc = _b64.b64encode(r.content).decode("ascii")
+                    return f"data:{ct};base64,{enc}"
+            return ""
+        except Exception as e:
+            logger.warning(f"generate_image failed (model={img_model}): {e}")
+            return ""
+
+    # ──────────────────────────────────────────────────────────────
     # 文档修订（"我的文档" 模块用）— 优先 Qwen，回落其它 provider
     # ──────────────────────────────────────────────────────────────
 

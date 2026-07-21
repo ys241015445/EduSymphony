@@ -33,11 +33,21 @@ RUN echo "deb https://mirrors.aliyun.com/debian bookworm main contrib non-free n
     echo "deb https://mirrors.aliyun.com/debian bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
     echo "deb https://mirrors.aliyun.com/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list
 
+# libreoffice-writer 供珠科教案助手 docx→pdf 真格式转换使用（详见
+# app/services/zhuke_lesson.py 的 convert_docx_to_pdf_via_soffice）。
+# 教学材料 HTML 走豆包两阶段（app/services/material_html_service.py）。
+# Writer 模块够用 (~250MB)，不需要 Calc/Impress 的完整 LibreOffice ~400MB。
+# 中文字体：fonts-wqy-zenhei / fonts-wqy-microhei / fonts-noto-cjk 三件套覆盖
+# 珠科模板里的仿宋 / 楷体 / 微软雅黑 等字符集。
 RUN apt-get update && apt-get install -y --no-install-recommends \
     nginx supervisor curl gcc g++ \
     pkg-config libcairo2-dev \
-    fonts-wqy-zenhei \
+    libreoffice-writer libreoffice-core \
+    fonts-wqy-zenhei fonts-wqy-microhei fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
+
+# 构建期硬校验：LibreOffice 未装上则 build 直接失败，避免运行期 PDF 503
+RUN soffice --version && test -x "$(command -v soffice)"
 
 # ---------- 后端 ----------
 WORKDIR /app/backend

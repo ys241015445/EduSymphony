@@ -98,17 +98,21 @@ def register_all_handlers() -> None:
     from app.api.series import _generate_syllabus
     register_handler("syllabus", _generate_syllabus)
 
-    # 课程工具异步队列（大纲 / PPT / 习题 / 练习）
+    # 课程工具异步队列（大纲 / PPT / 习题 / 练习 / 知识漫画）
     from app.tasks.course_tool_handlers import (
         run_outline_job,
         run_ppt_job,
         run_exercises_job,
         run_practice_job,
+        run_comic_job,
+        run_cards_job,
     )
     register_handler("tool_outline", run_outline_job)
     register_handler("tool_ppt", run_ppt_job)
     register_handler("tool_exercises", run_exercises_job)
     register_handler("tool_practice", run_practice_job)
+    register_handler("tool_comic", run_comic_job)
+    register_handler("tool_cards", run_cards_job)
 
     # 系列/批量导出（异步）：写入 tmp_exports/，写 ExportRecord，7 天 TTL
     from app.api.export import run_bundle_export_job, run_styled_pdf_job, run_material_job
@@ -116,5 +120,15 @@ def register_all_handlers() -> None:
     register_handler("styled_pdf", run_styled_pdf_job)
     register_handler("material_draft", run_material_job)
     register_handler("material_optimized", run_material_job)
+
+    # 珠科教案助手 — 后台批量生成（每课独立 SubAgent 入队）
+    from app.tasks.zhuke_task import (
+        run_zhuke_batch,
+        run_zhuke_lesson_relayout,
+        run_zhuke_lesson_single,
+    )
+    register_handler("zhuke_lesson_batch", run_zhuke_batch)
+    register_handler("zhuke_lesson_single", run_zhuke_lesson_single)
+    register_handler("zhuke_lesson_relayout", run_zhuke_lesson_relayout)
 
     logger.info("[queue] all job handlers registered")

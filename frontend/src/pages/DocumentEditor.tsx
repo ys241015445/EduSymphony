@@ -31,10 +31,14 @@ export default function DocumentEditor() {
   const t = useT()
   const navigate = useNavigate()
   const token = useAuthStore((s) => s.token)
-  const {
-    current, fetchVersion, createVersion,
-    versions, fetchVersionsForLesson, setCurrentVersion, deleteVersion,
-  } = useDocumentsStore()
+  // Atomic selectors; actions called via getState() in handlers/effects to avoid re-render loops.
+  const current = useDocumentsStore((s) => s.current)
+  const versions = useDocumentsStore((s) => s.versions)
+  const fetchVersion = useDocumentsStore((s) => s.fetchVersion)
+  const createVersion = useDocumentsStore((s) => s.createVersion)
+  const fetchVersionsForLesson = useDocumentsStore((s) => s.fetchVersionsForLesson)
+  const setCurrentVersion = useDocumentsStore((s) => s.setCurrentVersion)
+  const deleteVersion = useDocumentsStore((s) => s.deleteVersion)
 
   const [text, setText] = useState('')
   const [title, setTitle] = useState('')
@@ -52,16 +56,18 @@ export default function DocumentEditor() {
 
   useEffect(() => {
     if (!versionId) return
-    fetchVersion(versionId).then((v) => {
+    const store = useDocumentsStore.getState()
+    store.fetchVersion(versionId).then((v) => {
       setText(v.content_markdown || '')
       setTitle(v.title || '')
       if (v.lesson_plan_id) {
-        fetchVersionsForLesson(v.lesson_plan_id, v.source_kind, docScope)
+        store.fetchVersionsForLesson(v.lesson_plan_id, v.source_kind, forUserId ? { for_user_id: forUserId } : undefined)
       }
     }).catch((e) => {
       toast.error(e?.response?.data?.detail || t('doc.load_failed'))
     })
-  }, [versionId, fetchVersion, fetchVersionsForLesson, t, forUserId])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [versionId, forUserId])
 
   const dirty = current ? text !== (current.content_markdown || '') || title !== (current.title || '') : false
 

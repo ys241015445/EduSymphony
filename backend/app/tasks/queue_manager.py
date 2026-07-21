@@ -28,7 +28,7 @@ from typing import Any, Awaitable, Callable, Optional
 from loguru import logger
 from sqlalchemy import text
 
-from app.core.database import async_session_maker
+from app.core.database import async_session_maker, IS_POOLED
 
 
 # ───────────────────────── Config ─────────────────────────
@@ -40,11 +40,40 @@ def _env_int(key: str, default: int, lo: int = 1, hi: int = 10_000) -> int:
         return default
 
 
-MAX_CONCURRENT_TASKS = _env_int("MAX_CONCURRENT_TASKS", 5, 1, 64)
-MAX_PER_USER_TASKS = _env_int("MAX_PER_USER_TASKS", 3, 1, 32)
+MAX_CONCURRENT_TASKS = _env_int("MAX_CONCURRENT_TASKS", 4 if IS_POOLED else 10, 1, 64)
+MAX_PER_USER_TASKS = _env_int("MAX_PER_USER_TASKS", 2 if IS_POOLED else 3, 1, 32)
+from app.core.kimi_zhuke_config import KIMI_K2_CONCURRENCY
 TASK_TIMEOUT_SEC = _env_int("TASK_TIMEOUT_SEC", 1200, 60, 7200)
+# 按任务类型分档超时：教案家族耗时长（防被误杀），工具类短（更快恢复），其余用默认。
+LESSON_TASK_TIMEOUT_SEC = _env_int("LESSON_TASK_TIMEOUT_SEC", 3600, 300, 14_400)
+TOOL_TASK_TIMEOUT_SEC = _env_int("TOOL_TASK_TIMEOUT_SEC", 600, 60, 7200)
 WORKER_LEASE_SEC = _env_int("WORKER_LEASE_SEC", 1800, 60, 14_400)
-QUEUE_POLL_INTERVAL_MS = _env_int("QUEUE_POLL_INTERVAL_MS", 1000, 100, 60_000)
+ZHUKE_LESSON_LEASE_SEC = max(
+    _env_int("ZHUKE_LESSON_LEASE_SEC", 600, 120, 7200),
+    TASK_TIMEOUT_SEC,
+)
+
+# 教案家族（多智能体生成，耗时可能远超默认 1200s）
+_LESSON_KINDS = frozenset({
+    "lesson", "lesson_series", "lesson_copy", "lesson_quick",
+    "regenerate_full", "regenerate_optimized", "continue", "syllabus",
+})
+# 课程工具（较轻，超时短、恢复快）
+_TOOL_KINDS = frozenset({
+    "tool_outline", "tool_ppt", "tool_exercises", "tool_practice",
+    "tool_comic", "tool_cards",
+})
+# 教案家族租约：必须 ≥ 其超时，否则 sweeper 会在任务仍在跑时提前回收→重复执行
+LESSON_LEASE_SEC = max(WORKER_LEASE_SEC, LESSON_TASK_TIMEOUT_SEC + 300)
+
+
+def _timeout_for_kind(kind: str) -> int:
+    if kind in _LESSON_KINDS:
+        return LESSON_TASK_TIMEOUT_SEC
+    if kind in _TOOL_KINDS:
+        return TOOL_TASK_TIMEOUT_SEC
+    return TASK_TIMEOUT_SEC
+QUEUE_POLL_INTERVAL_MS = _env_int("QUEUE_POLL_INTERVAL_MS", 2000 if IS_POOLED else 1000, 100, 60_000)
 QUEUE_SWEEP_INTERVAL_SEC = _env_int("QUEUE_SWEEP_INTERVAL_SEC", 30, 5, 600)
 QUEUE_GC_DAYS = _env_int("QUEUE_GC_DAYS", 7, 1, 365)
 
@@ -138,7 +167,6 @@ async def enqueue(
             logger.info(
                 f"[queue] enqueued id={row[0]} kind={kind} target={target_id} user={user_id}"
             )
-            await _notify_position(target_id, kind)
             return True
         except Exception as e:
             await session.rollback()
@@ -217,6 +245,81 @@ async def queue_status(target_id: str, kind: Optional[str] = None) -> dict:
         }
 
 
+async def queue_status_batch(result_id: str) -> dict:
+    """Aggregate queue status for a zhuke batch (per-lesson SubAgent jobs)."""
+    prefix = f"{result_id}::"
+    try:
+        async with async_session_maker() as session:
+            res = await session.execute(
+                text(
+                    """
+                    SELECT status, error, kind
+                    FROM queue_jobs
+                    WHERE target_id = CAST(:rid AS varchar)
+                       OR target_id LIKE CAST(:prefix AS varchar)
+                    ORDER BY created_at DESC
+                    """
+                ),
+                {"rid": result_id, "prefix": f"{prefix}%"},
+            )
+            rows = list(res.mappings())
+    except Exception as e:
+        logger.warning(f"[queue] queue_status_batch failed rid={result_id}: {e!s:.160}")
+        return {
+            "position": -1,
+            "status": "unknown",
+            "error": "数据库暂不可用",
+            "db_unavailable": True,
+        }
+
+    if not rows:
+        return {"position": -1, "status": "unknown"}
+
+    statuses = [str(r["status"]) for r in rows]
+    errors = [str(r["error"]) for r in rows if r.get("error")]
+
+    if _docx_exists_batch(result_id):
+        return {"position": -1, "status": "done", "kind": "zhuke_lesson_single"}
+
+    if any(s == "failed" for s in statuses):
+        return {
+            "position": -1,
+            "status": "failed",
+            "kind": "zhuke_lesson_single",
+            "error": errors[0] if errors else "部分课次生成失败",
+        }
+    if any(s == "running" for s in statuses):
+        return {"position": 0, "status": "running", "kind": "zhuke_lesson_single"}
+    if any(s == "queued" for s in statuses):
+        return {"position": 1, "status": "queued", "kind": "zhuke_lesson_single"}
+    if any(s == "cancelled" for s in statuses):
+        if _docx_exists_batch(result_id):
+            return {"position": -1, "status": "done", "kind": "zhuke_lesson_single"}
+        # Surface 'cancelled' explicitly so boot-sync / status endpoints
+        # can short-circuit and NEVER re-enqueue these.
+        return {
+            "position": -1,
+            "status": "cancelled",
+            "kind": "zhuke_lesson_single",
+            "error": "用户已停止",
+        }
+    if statuses and all(s == "done" for s in statuses):
+        # All lesson jobs finished but docx may still be assembling — don't
+        # report "done" until the file actually exists on disk.
+        return {"position": 0, "status": "running", "kind": "zhuke_lesson_single"}
+    return {"position": -1, "status": "unknown", "kind": "zhuke_lesson_single"}
+
+
+def _docx_exists_batch(result_id: str) -> bool:
+    try:
+        from app.api.semester_helper import _docx_path_for
+        import os
+
+        return os.path.isfile(_docx_path_for(result_id))
+    except Exception:
+        return False
+
+
 async def queue_snapshot() -> dict:
     """全局统计：实时 + 24h 聚合。"""
     async with async_session_maker() as session:
@@ -271,7 +374,10 @@ async def queue_snapshot() -> dict:
         "max_concurrent": MAX_CONCURRENT_TASKS,
         "max_per_user": MAX_PER_USER_TASKS,
         "task_timeout_sec": TASK_TIMEOUT_SEC,
+        "lesson_task_timeout_sec": LESSON_TASK_TIMEOUT_SEC,
+        "tool_task_timeout_sec": TOOL_TASK_TIMEOUT_SEC,
         "worker_lease_sec": WORKER_LEASE_SEC,
+        "lesson_lease_sec": LESSON_LEASE_SEC,
         "workers_alive": sum(1 for w in _workers if not w.done()),
         "metrics_24h": {
             "done": done_24h,
@@ -360,23 +466,46 @@ async def _notify_position(target_id: str, kind: str):
 
 _CLAIM_SQL = text(
     """
-    WITH saturated AS (
+    WITH saturated_other AS (
         SELECT user_id
         FROM queue_jobs
-        WHERE status = 'running' AND user_id IS NOT NULL
+        WHERE status = 'running'
+          AND user_id IS NOT NULL
+          AND kind NOT IN ('zhuke_lesson_single', 'zhuke_lesson_relayout')
         GROUP BY user_id
         HAVING count(*) >= CAST(:per_user_limit AS integer)
+    ),
+    saturated_zhuke AS (
+        SELECT user_id
+        FROM queue_jobs
+        WHERE status = 'running'
+          AND user_id IS NOT NULL
+          AND kind IN ('zhuke_lesson_single', 'zhuke_lesson_relayout')
+        GROUP BY user_id
+        HAVING count(*) >= CAST(:kimi_concurrency AS integer)
     )
     UPDATE queue_jobs
     SET status = 'running',
         worker_id = CAST(:wid AS varchar),
         started_at = now(),
-        lease_until = now() + make_interval(secs => CAST(:lease_sec AS integer)),
+        lease_until = now() + make_interval(secs => CAST(
+            CASE WHEN kind IN ('zhuke_lesson_single', 'zhuke_lesson_relayout')
+                 THEN CAST(:zhuke_lease_sec AS integer)
+                 WHEN kind IN ('lesson','lesson_series','lesson_copy','lesson_quick',
+                               'regenerate_full','regenerate_optimized','continue','syllabus')
+                 THEN CAST(:lesson_lease_sec AS integer)
+                 ELSE CAST(:lease_sec AS integer) END AS integer)),
         attempts = attempts + 1
     WHERE id = (
         SELECT q.id FROM queue_jobs q
-        LEFT JOIN saturated s ON s.user_id = q.user_id
-        WHERE q.status = 'queued' AND s.user_id IS NULL
+        LEFT JOIN saturated_other so ON so.user_id = q.user_id
+            AND q.kind NOT IN ('zhuke_lesson_single', 'zhuke_lesson_relayout')
+        LEFT JOIN saturated_zhuke sz ON sz.user_id = q.user_id
+            AND q.kind IN ('zhuke_lesson_single', 'zhuke_lesson_relayout')
+        WHERE q.status = 'queued'
+          AND so.user_id IS NULL
+          AND sz.user_id IS NULL
+          AND q.kind = ANY(:kinds)
         ORDER BY q.priority DESC, q.created_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1
@@ -384,6 +513,30 @@ _CLAIM_SQL = text(
     RETURNING id, kind, target_id, user_id, attempts, max_attempts
     """
 )
+
+
+async def user_has_active_zhuke_jobs(user_id: str) -> bool:
+    """True when the user already has queued/running zhuke per-lesson jobs."""
+    if not user_id:
+        return False
+    try:
+        async with async_session_maker() as session:
+            res = await session.execute(
+                text(
+                    """
+                    SELECT 1 FROM queue_jobs
+                    WHERE user_id = CAST(:uid AS varchar)
+                      AND kind IN ('zhuke_lesson_single', 'zhuke_lesson_relayout')
+                      AND status IN ('queued', 'running')
+                    LIMIT 1
+                    """
+                ),
+                {"uid": str(user_id)},
+            )
+            return res.first() is not None
+    except Exception as e:
+        logger.warning(f"[queue] active zhuke lookup failed user={user_id}: {e}")
+        return False
 
 
 async def _claim_one(worker_id: str) -> Optional[dict]:
@@ -397,7 +550,8 @@ async def _claim_one(worker_id: str) -> Optional[dict]:
     from app.core.database import _is_transient_disconnect
 
     last_err: Optional[BaseException] = None
-    for attempt in range(2):
+    backoff_s = (0.5, 1.0, 2.0)
+    for attempt in range(3):
         try:
             async with async_session_maker() as session:
                 try:
@@ -406,7 +560,13 @@ async def _claim_one(worker_id: str) -> Optional[dict]:
                         {
                             "wid": worker_id,
                             "lease_sec": WORKER_LEASE_SEC,
+                            "zhuke_lease_sec": ZHUKE_LESSON_LEASE_SEC,
+                            "lesson_lease_sec": LESSON_LEASE_SEC,
                             "per_user_limit": MAX_PER_USER_TASKS,
+                            "kimi_concurrency": KIMI_K2_CONCURRENCY,
+                            # 只认领本进程已注册 handler 的 kind，避免与共用同一队列
+                            # 的旧版本后端互抢导致 "no handler registered" 误判失败
+                            "kinds": list(_HANDLERS.keys()),
                         },
                     )
                     row = res.mappings().first()
@@ -420,15 +580,46 @@ async def _claim_one(worker_id: str) -> Optional[dict]:
                     raise inner
         except Exception as e:
             last_err = e
-            if attempt == 0 and _is_transient_disconnect(e):
-                # 池已被 listener 标 invalid，下次 checkout 一定是新连接
-                await asyncio.sleep(0.3)
+            if attempt < 2 and _is_transient_disconnect(e):
+                await asyncio.sleep(backoff_s[attempt])
                 continue
             break
 
     if last_err is not None:
         logger.error(f"[queue] claim failed worker={worker_id}: {last_err}")
     return None
+
+
+async def cancel_zhuke_jobs_for_batch(result_id: str) -> int:
+    """Cancel all queued/running zhuke jobs for a batch (result_id or rid::idx)."""
+    prefix = f"{result_id}::"
+    async with async_session_maker() as session:
+        res = await session.execute(
+            text(
+                """
+                UPDATE queue_jobs
+                SET status='cancelled',
+                    finished_at=now(),
+                    lease_until=NULL,
+                    error=COALESCE(error, '用户已停止')
+                WHERE status IN ('queued', 'running')
+                  AND kind IN (
+                      'zhuke_lesson_single',
+                      'zhuke_lesson_relayout',
+                      'zhuke_lesson_batch'
+                  )
+                  AND (
+                      target_id = CAST(:rid AS varchar)
+                      OR target_id LIKE CAST(:prefix AS varchar)
+                  )
+                RETURNING id
+                """
+            ),
+            {"rid": result_id, "prefix": f"{prefix}%"},
+        )
+        n = len(res.fetchall())
+        await session.commit()
+        return n
 
 
 async def _mark_done(job_id: int, target_id: str, kind: str):
@@ -439,6 +630,7 @@ async def _mark_done(job_id: int, target_id: str, kind: str):
                 UPDATE queue_jobs
                 SET status='done', finished_at=now(), lease_until=NULL
                 WHERE id = CAST(:id AS bigint)
+                  AND status = 'running'
                 """
             ),
             {"id": job_id},
@@ -502,18 +694,19 @@ async def _run_job(worker_id: str, job: dict):
         return
 
     await _notify_position(target_id, kind)
+    job_timeout = _timeout_for_kind(kind)
     try:
-        await asyncio.wait_for(handler(target_id), timeout=TASK_TIMEOUT_SEC)
+        await asyncio.wait_for(handler(target_id), timeout=job_timeout)
         await _mark_done(job_id, target_id, kind)
         logger.info(f"[queue] done id={job_id} kind={kind} target={target_id}")
     except asyncio.TimeoutError:
         logger.error(
             f"[queue] timeout id={job_id} kind={kind} target={target_id} "
-            f"after {TASK_TIMEOUT_SEC}s"
+            f"after {job_timeout}s"
         )
         await _mark_failed(
             job_id, target_id, kind,
-            err=f"timeout after {TASK_TIMEOUT_SEC}s",
+            err=f"timeout after {job_timeout}s",
             attempts=attempts, max_attempts=max_attempts,
         )
     except asyncio.CancelledError:
@@ -623,6 +816,31 @@ async def _sweeper_loop():
                         """
                     )
                 )
+                # course_tool_results 兜底：pending/running 但其 tool_ 队列任务已 failed/cancelled
+                # 且无活跃任务（典型场景：跨实例/旧版本后端在队列层判失败但没翻结果状态）→ 置 failed，
+                # 避免前端产物永远显示"排队中"。EXISTS(failed) 守卫避免误伤"刚建 pending、任务尚未落库"的竞态。
+                await session.execute(
+                    text(
+                        """
+                        UPDATE course_tool_results
+                        SET status='failed',
+                            error_message=coalesce(error_message, '任务在其它实例失败或被中断，请重新生成')
+                        WHERE status IN ('pending','running')
+                          AND NOT EXISTS (
+                              SELECT 1 FROM queue_jobs qj
+                               WHERE qj.target_id = course_tool_results.id
+                                 AND qj.kind IN ('tool_outline','tool_ppt','tool_exercises','tool_practice','tool_comic','tool_cards')
+                                 AND qj.status IN ('queued','running')
+                          )
+                          AND EXISTS (
+                              SELECT 1 FROM queue_jobs qj
+                               WHERE qj.target_id = course_tool_results.id
+                                 AND qj.kind IN ('tool_outline','tool_ppt','tool_exercises','tool_practice','tool_comic','tool_cards')
+                                 AND qj.status IN ('failed','cancelled')
+                          )
+                        """
+                    )
+                )
                 # GC 完成记录
                 await session.execute(
                     text(
@@ -634,6 +852,79 @@ async def _sweeper_loop():
                     ),
                     {"days": QUEUE_GC_DAYS},
                 )
+                # GC cancelled（珠科 batch 取消会堆积）
+                await session.execute(
+                    text(
+                        """
+                        DELETE FROM queue_jobs
+                        WHERE status = 'cancelled'
+                          AND coalesce(finished_at, created_at) < now() - interval '1 day'
+                        """
+                    )
+                )
+                # zhuke 排队超时 watchdog：记录长时间未认领的 queued job
+                stale_zhuke = await session.execute(
+                    text(
+                        """
+                        SELECT id, target_id, user_id, attempts, max_attempts
+                        FROM queue_jobs
+                        WHERE kind IN ('zhuke_lesson_batch', 'zhuke_lesson_single', 'zhuke_lesson_relayout')
+                          AND status = 'queued'
+                          AND created_at < now() - interval '3 minutes'
+                        """
+                    )
+                )
+                for row in stale_zhuke.mappings():
+                    logger.warning(
+                        f"[queue] zhuke job id={row['id']} target={row['target_id']} "
+                        f"queued >3min attempts={row['attempts']}/{row['max_attempts']}"
+                    )
+                    if int(row["attempts"] or 0) == 0:
+                        logger.error(
+                            f"[queue] zhuke job id={row['id']} target={row['target_id']} "
+                            f"queued >3min with attempts=0 — workers may not be claiming"
+                        )
+                await session.execute(
+                    text(
+                        """
+                        UPDATE queue_jobs
+                        SET error = coalesce(error, 'queued_stale_no_worker')
+                        WHERE kind IN ('zhuke_lesson_batch', 'zhuke_lesson_single', 'zhuke_lesson_relayout')
+                          AND status = 'queued'
+                          AND created_at < now() - interval '3 minutes'
+                          AND attempts = 0
+                          AND (error IS NULL OR error = '')
+                        """
+                    )
+                )
+                # zhuke running 卡住：超过 15 分钟仍未完成 → 回队重试
+                await session.execute(
+                    text(
+                        """
+                        UPDATE queue_jobs
+                        SET status='queued', worker_id=NULL, lease_until=NULL,
+                            error=coalesce(error, 'zhuke_running_stale_requeued')
+                        WHERE kind IN ('zhuke_lesson_single', 'zhuke_lesson_relayout')
+                          AND status = 'running'
+                          AND started_at < now() - interval '15 minutes'
+                          AND attempts < max_attempts
+                        """
+                    )
+                )
+                await session.execute(
+                    text(
+                        """
+                        UPDATE queue_jobs
+                        SET status='failed', finished_at=now(),
+                            lease_until=NULL,
+                            error=coalesce(error, 'queued_timeout_exhausted')
+                        WHERE kind IN ('zhuke_lesson_batch', 'zhuke_lesson_single', 'zhuke_lesson_relayout')
+                          AND status = 'queued'
+                          AND created_at < now() - interval '3 minutes'
+                          AND attempts >= max_attempts
+                        """
+                    )
+                )
                 await session.commit()
         except Exception as e:
             # 闪断 → 池已被 listener 标 invalid，下次 checkout 自动新建。
@@ -642,6 +933,12 @@ async def _sweeper_loop():
                 logger.warning(f"[queue] sweeper transient disconnect: {e!s:.180}")
             else:
                 logger.error(f"[queue] sweeper error: {e}")
+
+        try:
+            from app.tasks.zhuke_task import sync_zhuke_failed_queue_exports
+            await sync_zhuke_failed_queue_exports()
+        except Exception as e:
+            logger.warning(f"[queue] zhuke export sync skipped: {e}")
 
         try:
             await asyncio.wait_for(_stop_flag.wait(), timeout=QUEUE_SWEEP_INTERVAL_SEC)
@@ -655,6 +952,8 @@ async def _sweeper_loop():
 
 async def start_workers(n: Optional[int] = None):
     """启动 N 个 worker 协程 + 1 个 sweeper。"""
+    from app.core.kimi_zhuke_config import KIMI_K2_MODEL
+
     global _sweeper
     count = n or MAX_CONCURRENT_TASKS
     _stop_flag.clear()
@@ -663,8 +962,12 @@ async def start_workers(n: Optional[int] = None):
         t = asyncio.create_task(_worker_loop(i), name=f"queue-worker-{i}")
         _workers.append(t)
     _sweeper = asyncio.create_task(_sweeper_loop(), name="queue-sweeper")
-    logger.info(f"[queue] {count} workers + 1 sweeper launched "
-                f"(lease={WORKER_LEASE_SEC}s per_user={MAX_PER_USER_TASKS})")
+    logger.info(
+        f"[queue] {count} workers + 1 sweeper launched "
+        f"(lease={WORKER_LEASE_SEC}s lesson_lease={LESSON_LEASE_SEC}s per_user={MAX_PER_USER_TASKS} "
+        f"timeout default={TASK_TIMEOUT_SEC}s lesson={LESSON_TASK_TIMEOUT_SEC}s tool={TOOL_TASK_TIMEOUT_SEC}s "
+        f"kimi_concurrency={KIMI_K2_CONCURRENCY} model={KIMI_K2_MODEL})"
+    )
 
 
 async def stop_workers(drain_timeout: float = 20.0):
@@ -684,6 +987,41 @@ async def stop_workers(drain_timeout: float = 20.0):
             await t
         except (asyncio.CancelledError, Exception):
             pass
+    # Requeue any zhuke jobs THIS process was running so the next boot (or
+    # another replica) can claim them within seconds, instead of waiting
+    # for `lease_until` (default 600s) to expire. Filtered by worker_id
+    # prefix so multi-replica deployments don't steal a sibling's work.
+    try:
+        async with async_session_maker() as session:
+            res = await session.execute(
+                text(
+                    """
+                    UPDATE queue_jobs
+                    SET status='queued',
+                        worker_id=NULL,
+                        lease_until=NULL,
+                        error=COALESCE(error, 'graceful_shutdown_requeue')
+                    WHERE kind IN (
+                        'zhuke_lesson_single',
+                        'zhuke_lesson_relayout',
+                        'zhuke_lesson_batch'
+                    )
+                      AND status='running'
+                      AND worker_id LIKE :prefix
+                    RETURNING id
+                    """
+                ),
+                {"prefix": f"{_WORKER_ID_BASE}%"},
+            )
+            ids = [r[0] for r in res.fetchall()]
+            await session.commit()
+            if ids:
+                logger.info(
+                    f"[queue] shutdown requeued {len(ids)} running zhuke jobs: "
+                    f"{ids[:5]}{'...' if len(ids) > 5 else ''}"
+                )
+    except Exception as e:
+        logger.warning(f"[queue] shutdown requeue failed: {e}")
     _workers.clear()
     logger.info("[queue] all workers stopped")
 

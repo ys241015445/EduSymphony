@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.sql import func
 from typing import Optional, List
 from pydantic import BaseModel
 from datetime import datetime
@@ -10,9 +11,14 @@ import aiofiles
 from loguru import logger
 
 from app.core.config import settings
-from app.core.deps import get_db, get_current_active_user, resolve_documents_owner
+from app.core.deps import (
+    get_db, get_current_active_user, resolve_documents_owner, allow_include_deleted,
+    user_access_level, ACCESS_ADMIN,
+)
 from app.models.user import User
 from app.models.lesson import LessonSeries, LessonPlan, LessonStatus
+from app.services import k12_skills as _k12_skills
+from app.services import teacher_standard as _teacher_standard
 
 router = APIRouter(prefix="/series", tags=["系列教案"])
 
@@ -81,12 +87,21 @@ async def create_series(
     schedule_text: Optional[str] = Form(None),
     outline_text: Optional[str] = Form(None),
     special_requirements: Optional[str] = Form(None),
+    for_user_id: Optional[str] = Query(None, description="管理员：以指定用户身份创建系列"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    # Capability gate (admins always bypass): university vs k12 series
+    if user_access_level(current_user) != ACCESS_ADMIN:
+        is_uni = (education_level or "k12").lower() == "university"
+        needed = "can_university" if is_uni else "can_series"
+        if not getattr(current_user, needed, True):
+            raise HTTPException(status_code=403, detail=f"当前账号无权使用此功能：{needed}")
+
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
     book_content = source_content or ""
     if file:
-        user_dir = os.path.join(settings.FILES_DIR, current_user.id)
+        user_dir = os.path.join(settings.FILES_DIR, owner.id)
         os.makedirs(user_dir, exist_ok=True)
         file_path = os.path.join(user_dir, f"{uuid.uuid4()}_{file.filename}")
         async with aiofiles.open(file_path, "wb") as f:
@@ -136,15 +151,15 @@ async def create_series(
 @router.get("", response_model=List[SeriesListResponse])
 async def list_series(
     for_user_id: Optional[str] = Query(None, description="管理员：列出指定用户的系列"),
+    include_deleted: bool = Query(False, description="管理员可见：包含软删除系列"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     owner = await resolve_documents_owner(db, current_user, for_user_id)
-    result = await db.execute(
-        select(LessonSeries)
-        .where(LessonSeries.user_id == owner.id)
-        .order_by(LessonSeries.created_at.desc())
-    )
+    q = select(LessonSeries).where(LessonSeries.user_id == owner.id)
+    if not allow_include_deleted(current_user, include_deleted):
+        q = q.where(LessonSeries.deleted_at.is_(None))
+    result = await db.execute(q.order_by(LessonSeries.created_at.desc()))
     return [SeriesListResponse.model_validate(s) for s in result.scalars().all()]
 
 
@@ -152,13 +167,15 @@ async def list_series(
 async def get_series(
     series_id: str,
     for_user_id: Optional[str] = Query(None, description="管理员：读取指定用户的系列"),
+    include_deleted: bool = Query(False, description="管理员可见：包含软删除系列"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     owner = await resolve_documents_owner(db, current_user, for_user_id)
-    result = await db.execute(
-        select(LessonSeries).where(LessonSeries.id == series_id, LessonSeries.user_id == owner.id)
-    )
+    q = select(LessonSeries).where(LessonSeries.id == series_id, LessonSeries.user_id == owner.id)
+    if not allow_include_deleted(current_user, include_deleted):
+        q = q.where(LessonSeries.deleted_at.is_(None))
+    result = await db.execute(q)
     series = result.scalar_one_or_none()
     if not series:
         raise HTTPException(status_code=404, detail="系列不存在")
@@ -169,23 +186,58 @@ async def get_series(
 async def get_series_lessons(
     series_id: str,
     for_user_id: Optional[str] = Query(None, description="管理员：列出指定用户在该系列下的教案"),
+    include_deleted: bool = Query(False, description="管理员可见：包含软删除课时"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     owner = await resolve_documents_owner(db, current_user, for_user_id)
-    result = await db.execute(
-        select(LessonPlan)
-        .where(LessonPlan.sequence_id == series_id, LessonPlan.user_id == owner.id)
-        .order_by(LessonPlan.sequence_order)
+    q = select(LessonPlan).where(
+        LessonPlan.sequence_id == series_id, LessonPlan.user_id == owner.id,
     )
+    if not allow_include_deleted(current_user, include_deleted):
+        q = q.where(LessonPlan.deleted_at.is_(None))
+    result = await db.execute(q.order_by(LessonPlan.sequence_order))
     lessons = result.scalars().all()
     return [
         {
             "id": l.id, "title": l.title, "status": l.status,
             "progress": l.progress, "sequence_order": l.sequence_order,
+            "deleted_at": l.deleted_at.isoformat() if getattr(l, "deleted_at", None) else None,
         }
         for l in lessons
     ]
+
+
+@router.delete("/{series_id}", status_code=204)
+async def delete_series(
+    series_id: str,
+    for_user_id: Optional[str] = Query(None, description="管理员：软删除指定用户的系列"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Soft delete a series and all of its lesson_plans (deleted_at = now())."""
+    owner = await resolve_documents_owner(db, current_user, for_user_id)
+    result = await db.execute(
+        select(LessonSeries).where(
+            LessonSeries.id == series_id,
+            LessonSeries.user_id == owner.id,
+            LessonSeries.deleted_at.is_(None),
+        )
+    )
+    series = result.scalar_one_or_none()
+    if not series:
+        raise HTTPException(status_code=404, detail="系列不存在")
+    series.deleted_at = func.now()
+    await db.execute(
+        update(LessonPlan)
+        .where(
+            LessonPlan.sequence_id == series_id,
+            LessonPlan.user_id == owner.id,
+            LessonPlan.deleted_at.is_(None),
+        )
+        .values(deleted_at=func.now())
+    )
+    await db.commit()
 
 
 @router.post("/{series_id}/generate-all")
@@ -197,7 +249,11 @@ async def generate_all_lessons(
 ):
     owner = await resolve_documents_owner(db, current_user, for_user_id)
     result = await db.execute(
-        select(LessonSeries).where(LessonSeries.id == series_id, LessonSeries.user_id == owner.id)
+        select(LessonSeries).where(
+            LessonSeries.id == series_id,
+            LessonSeries.user_id == owner.id,
+            LessonSeries.deleted_at.is_(None),
+        )
     )
     series = result.scalar_one_or_none()
     if not series:
@@ -340,6 +396,11 @@ async def _generate_syllabus(series_id: str):
                 if is_university
                 else "你是资深课程规划专家。请生成完整的学期教学大纲，严格按JSON格式输出。"
             )
+            # 通用教学标准（全局基线，K12/大学都注入精简版）
+            sys_msg = sys_msg + "\n\n" + _teacher_standard.standard_brief(getattr(series, "locale", None))
+            if not is_university:  # K12：额外注入 k12-teacher-skills 蒸馏的教学法
+                sys_msg = sys_msg + "\n\n" + _k12_skills.course_tool_skills(getattr(series, "locale", None))
+            sys_msg = sys_msg + "\n（注意：以上为教学法要求，本次仍必须严格只输出 JSON。）"
             provider = "qwen" if is_university else None
             raw = await ai.generate(
                 prompt,

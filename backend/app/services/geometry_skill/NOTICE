@@ -1,0 +1,23 @@
+This package vendors and adapts the "edu-solid-geometry" skill from the
+edulab project.
+
+Upstream source : https://github.com/wy51ai/edulab
+Skill path      : skills/edu-solid-geometry
+License         : Apache License 2.0 (see LICENSE.upstream)
+Author          : wy51ai (edulab)
+
+Faithfully vendored (unmodified in behavior):
+  - geometry_kernel.py       (lib/geometry_kernel.py)
+  - bodies.py                (lib/bodies.py)
+  - template_lesson.html     (template/lesson.html)
+
+Added for backend integration (original work, same Apache-2.0 terms):
+  - render.py    : render lesson_data into the template, returning an HTML
+                   string (no filesystem write, no cwd dependency).
+  - driver.py    : a generic, deterministic `problem spec -> lesson_data`
+                   builder on top of geometry_kernel + bodies (upstream only
+                   ships per-problem example builders in scripts/generate.py).
+  - extract.py   : solid-geometry detection + AI structured extraction of a
+                   problem spec from lesson content.
+
+The upstream Apache-2.0 license text is retained in LICENSE.upstream.

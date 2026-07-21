@@ -4,7 +4,7 @@ import { getSocket, joinUser } from '../services/socket'
 import { toast } from '../components/ui/Toast'
 import { useAuthStore } from './authStore'
 
-export type ToolType = 'outline' | 'ppt' | 'exercises' | 'practice'
+export type ToolType = 'outline' | 'ppt' | 'exercises' | 'practice' | 'comic' | 'cards'
 
 export interface JobItem {
   result_id: string
@@ -20,6 +20,7 @@ interface JobsState {
   initialized: boolean
   _socketBound: boolean
   add: (j: Omit<JobItem, 'status' | 'enqueued_at'> & { status?: JobItem['status'] }) => void
+  markRunning: (result_id: string) => void
   markCompleted: (result_id: string, extra?: { title?: string }) => void
   markFailed: (result_id: string, err?: string) => void
   remove: (result_id: string) => void
@@ -33,6 +34,8 @@ const KIND_TO_TOOL: Record<string, ToolType | undefined> = {
   tool_ppt: 'ppt',
   tool_exercises: 'exercises',
   tool_practice: 'practice',
+  tool_comic: 'comic',
+  tool_cards: 'cards',
 }
 
 export const useJobsStore = create<JobsState>((set, get) => ({
@@ -54,6 +57,14 @@ export const useJobsStore = create<JobsState>((set, get) => ({
     } else {
       set({ items: [next, ...get().items] })
     }
+  },
+
+  markRunning: (result_id) => {
+    set({
+      items: get().items.map((i) =>
+        i.result_id === result_id && i.status === 'queued' ? { ...i, status: 'running' } : i,
+      ),
+    })
   },
 
   markCompleted: (result_id, extra) => {
@@ -81,7 +92,7 @@ export const useJobsStore = create<JobsState>((set, get) => ({
 
   refreshFromServer: async () => {
     try {
-      const kinds = 'tool_outline,tool_ppt,tool_exercises,tool_practice'
+      const kinds = 'tool_outline,tool_ppt,tool_exercises,tool_practice,tool_comic,tool_cards'
       const [queued, running] = await Promise.all([
         api.get('/api/v1/system/queue/jobs', { params: { mine: true, status: 'queued', kinds, limit: 100 } }),
         api.get('/api/v1/system/queue/jobs', { params: { mine: true, status: 'running', kinds, limit: 100 } }),
@@ -108,7 +119,20 @@ export const useJobsStore = create<JobsState>((set, get) => ({
           } catch {}
         }),
       )
-      set({ items: mapped, initialized: true })
+      // 合并而非整表替换：保留 socket 已置为 completed/failed 的本地项（避免轮询把"已完成"抹掉），
+      // 用服务端的 queued/running 更新或新增（保留已有 title）。
+      const prev = get().items
+      const serverIds = new Set(mapped.map((m) => m.result_id))
+      const merged: JobItem[] = mapped.map((m) => {
+        const old = prev.find((p) => p.result_id === m.result_id)
+        return old ? { ...m, title: m.title || old.title, enqueued_at: old.enqueued_at } : m
+      })
+      for (const p of prev) {
+        if (serverIds.has(p.result_id)) continue
+        // 本地已是终态则保留展示；否则（服务端已无该在途项）丢弃
+        if (p.status === 'completed' || p.status === 'failed') merged.push(p)
+      }
+      set({ items: merged, initialized: true })
     } catch {
       set({ initialized: true })
     }
@@ -120,6 +144,10 @@ export const useJobsStore = create<JobsState>((set, get) => ({
     const user = useAuthStore.getState().user
     if (user?.id) joinUser(user.id)
 
+    s.on('course_tool_running', (payload: any) => {
+      if (!payload?.result_id) return
+      get().markRunning(payload.result_id)
+    })
     s.on('course_tool_completed', (payload: any) => {
       if (!payload?.result_id) return
       get().markCompleted(payload.result_id, { title: payload.title })

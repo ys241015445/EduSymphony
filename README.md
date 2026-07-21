@@ -8,17 +8,27 @@
 - **多智能体教研讨论**：5 位 AI 专家分别对 16 个教学环节（5E×5 + BOPPPS×6 + PBL×5）独立分析、逐条互评投票、给出赞成/反对理由
 - **快速生成模式**：输入主题即可直接生成初步教案，跳过多轮讨论，适合快速使用场景
 - **流式实时生成**：初步教案、教研讨论、专家投票、优化教案全程流式传输，Socket.IO 推送实时更新
-- **教学材料生成**：基于教案内容由 AI 生成交互式 HTML 课程演示页面，支持后台运行，刷新页面不中断
+- **教学材料生成**：基于教案内容由**豆包两阶段**生成交互式 HTML 课程演示页——Stage A 抽取 ≥6 个知识点 JSON，Stage B 由 Python 模板壳渲染（全屏/主题/导航/折叠/思考题/进度等交互 JS 由模板保证可用）；数学立体几何/化学反应仍优先走确定性 skill 路径；失败时 fallback 为豆包单轮 HTML（`material_*_engine` 字段标注通道）
 - **当地风格排版 PDF**：基于范本格式由 AI 生成排版精美的教案 HTML，支持后台运行
 - **多 AI 模型支持**：Qwen（通义千问）、Kimi（月之暗面）、Doubao（豆包）、DeepSeek、Spark（讯飞星火）五家模型分配给五位专家
 - **多地区适配**：支持澳门/香港繁体中文教案生成（含教青局基本学力要求等本地化结构）
 - **国际化 (i18n)**：前端支持简体中文、繁体中文、英文切换，自动根据地区切换字体与语言
 - **多用户隔离**：JWT 认证，每个用户只能看到和操作自己的教案，Socket.IO 按 lesson room 隔离推送
 - **RBAC**：`users.access_level` 区分管理员与普通/受限用户；管理员在 Dashboard 可查看队列任务与用户维度信息；受限用户仅保留必要入口。部署需执行 `supabase_user_access_level_migration.sql`（见下方 SQL 顺序）；**可选**在 7 步完成后追加 `supabase_safe_run.sql` 做保守加固（不自动设管理员账号）。**勿在 README、截图或 Git 中粘贴生产账号、密码或完整连接串。**
+- **细粒度功能开关**：每用户 7 个 `can_*` 布尔列（`can_course_tools` / `can_template_fill` / `can_university` / `can_series` / `can_next_lesson` / `can_export` 默认 TRUE；`can_semester_helper` 默认 FALSE）；管理员页可逐项勾选/取消，后端 `require_capability(flag)` 守卫 + 前端 `CapabilityRoute` 同步校验；admin（`lzf` / `ys`）始终自动绕过所有 `can_*` 检查
+- **学期材料小助手 + 珠科教案助手**：`/semester-helper` 学期材料小助手模块（hub），子模块 `/semester-helper/zhuke` 珠科教案助手 —— 上传珠科教学日历 xlsx/docx → 后端 `openpyxl` / `python-docx` 解析出封面信息 + 每节课主题 → Kimi K2.6（`KIMI_K2_MODEL`）逐节生成教学目标/重难点/教学过程 → 按 `backend/templates/zhuke_lesson_template.docx` 模板组装 → docx / pdf 下载，全程记入 `export_records`。**异步队列 + 实时预览**：POST `/zhuke/generate` 立即入队返 `result_id`；每节课独立入队为 `zhuke_lesson_single`（`target_id={result_id}::{idx}`），多 worker 并行 claim，单用户珠科并发上限 `KIMI_K2_CONCURRENCY=4`（可在 `.env` 调高）；每课用独立 `LessonSubAgent` 调 Kimi，调 Kimi 前 emit `zhuke_lesson_started` 心跳，Kimi 返回后立刻 emit `zhuke_lesson_done` 带完整 9-section JSON 并增量写 `{rid}.lessons.json`，前端折叠卡片实时冒出；全部课次完成后 `maybe_finalize_zhuke_batch` 按课序合并 docx 并 emit `zhuke_complete`。**专属入口**：`/semester-helper/zhuke/history` 「我的珠科教案」独立全量历史页（docx/pdf 双下载 + 删除）；`/documents?tab=exports` 通用文档库识别 `zhuke_generation` 中文标签 + 下拉过滤 + 珠科行专属 docx/pdf 双下载。**docx 排版**：cover 6 字段（学院/专业/班级/授课类别/课程名称/主讲教师）填值时自动带下划线 + 字体跟模板 label 一致；「授课题目（项目或模块）」cell 用教学日历里的原文（不截断）；每周首节强制新页 + 完整 heading，同周后续表格紧贴。**docx → pdf 真格式转换**：调系统的 LibreOffice headless (`soffice --headless --convert-to pdf`) 保留所有表格 / 字体 / 下划线 / 分页（需在服务器安装 `libreoffice-writer`，详见部署章节）；缺失时返 503 + 中文 actionable 提示。**自愈机制**：worker 被 cancel/reload 杀掉时 `except asyncio.CancelledError` 路径标 DB row failed；backend startup 跑 `_zhuke_resurrect_orphans()` 把 `updated_at > 15min` 的 running/queued 孤儿行转 failed；admin POST `/zhuke/admin/cleanup-missing` 一次性扫表把 docx 丢失的行标 failed + 清残留 sidecar；status='done' 但磁盘 docx 已被清的行在 UI 显示「文件已丢失」+ 重新生成按钮（不再点了才 404）
+- **软删除全表覆盖**：`lesson_plans` / `lesson_series` / `document_versions` / `export_records` 四张表全部走 `deleted_at` 软删除；普通用户列表默认隐藏；管理员通过 `?include_deleted=true` 仍可查看与恢复
+- **完整导出留痕**：所有下载/导出按钮点击（教案 JSON/TXT/MD/DOCX/PDF、教学材料、排版 PDF、模板填写、课程工具产物、珠科教案 docx/pdf、客户端直连下载）都记入 `export_records`；管理员可在用户详情页查看、下载或删除任意用户的导出历史
 - **云端数据库**：Supabase PostgreSQL 托管存储 + 本地文件存储，asyncpg 驱动 + 连接池自适应（直连 / Transaction Pooler 自动切换）
 - **系统公告 Banner**：顶部全站公告，可通过 `BANNER_TEXT` 环境变量一键配置
 - **Postgres 持久化任务队列**：队列落盘至 `queue_jobs` 表（`SELECT FOR UPDATE SKIP LOCKED`），支持重启恢复、多实例横向扩展、单用户并发上限、lease/sweeper 自动回收超时任务，Socket.IO 实时推送排队位置
-- **课程工具模块**：基于教案/大纲自动生成 PPT、习题、课堂练习，内置四个子工具（Outline / PPT / Exercises / Practice）。其中 PPT 走**本地两阶段豆包深度生成**：先生成 15-25 页结构化大纲，再以 8 并发为每页生成富文本 bullets + 主讲稿，最后由 `python-pptx` 用 12 种内置版式渲染（不依赖任何第三方 PPT 插件，完全可控）
+- **课程工具模块**：基于教案/大纲自动生成 PPT、习题、课堂练习，内置多个子工具（Outline / PPT / Exercises / Practice / 知识漫画 / 英语卡片）。其中 PPT 走**本地两阶段豆包深度生成**：先生成 15-25 页结构化大纲，再以 8 并发为每页生成富文本 bullets + 主讲稿，最后由 `python-pptx` 用 12 种内置版式渲染（不依赖任何第三方 PPT 插件，完全可控）；另提供 **HTML 网页版 PPT + 在线预览**（guizang 风格多套「版式体系」主题）
+- **知识漫画 & 英语学习卡片**：`知识漫画` 由 AI 产出分镜脚本并渲染为自包含交互 HTML；`英语学习卡片` 生成结构化单词卡 HTML。二者均支持**豆包 Seedream 文生图配图**（`DOUBAO_IMAGE_MODEL` 开启时按分镜/单词并发生成 base64 图片内嵌，关闭时优雅降级为纯文本）
+- **导出/下载付费闸门**：普通用户导出/下载材料前需消耗导出额度（`users.export_credits`）；管理员 `lzf`/`ys` 与白名单（`export_pay_exempt`）豁免。支持 **V免签自动确认** 与 **扫码+「我已支付」→临时额度+邮件通知人工补额** 两种方式（详见「付费闸门」章节）
+- **教案可见性分级**：除管理员 `ys`/`lzf` 外，其他用户在**优秀教案生成完成前看不到初步教案**（含快速模式），也不能导出；原初步教案位置改为展示教学环节、AI 教师意见/投票、教案信息、支架式教学，以及点击环节时的详情结果，并单独提供「专家分析」右侧详情 Tab
+- **教材接地（ChinaTextbook）**：创建教案时可级联选择「学段 / 学科 / 版本 / 教材 / 章节」，作为 `lesson_plans.textbook_ref` 注入生成上下文（仅内置目录元数据 + 外链，不分发教材文件）
+- **通用 AI 教师标准 + K12 + 特殊教育**：所有内容生成 agent 注入统一「AI 教师标准」基线；K12 教案叠加 K12 教学法（对齐国内课标）；识别到特教场景自动叠加特殊教育教案专项标准
+- **学科增强 skill**：数学立体几何（SymPy 精确求解 + Three.js 3D 演示，支持「上传题目图片解题」多模态入口）；化学反应（确定性反应内核 + 微观 3D 反应演示）
 - **大学年级专用页**：`/university` 专门面向大学教案，支持 1 节课 / 几周 / 一学期批量生成（Qwen）+ 可选课上练习/习题生成（DeepSeek），支持合并导出、按周打包 ZIP 导出
 - **模板 AI 填写**：`/template-fill` 独立辅助工具 —— 上传 docx / pptx / xlsx / txt / md 模板 + 描述要生成的内容，Qwen 识别占位符（显式 `{{xxx}}` / `____` / `<xxx>` / `【xxx】` / `《xxx》`，否则 AI 自动识别），保留原排版填入，支持跨格式导出
 - **灵活重新生成**：支持重新生成初步教案（清除后续讨论）、二次优化教案、重新生成单条专家建议（自动触发全环节重新投票）、重新生成单个教学环节
@@ -38,7 +48,10 @@ EduSymphony/
 │   │   ├── queue_manager.py         Postgres-backed 队列 + worker/sweeper
 │   │   ├── job_handlers.py          kind → handler 注册表
 │   │   └── lesson_task.py           教案多阶段生成流水线
-│   ├── app/services/                AI 服务、PPT、模板填写等
+│   ├── app/services/                AI 服务、PPT、模板填写、material_html_service（教学材料豆包两阶段）等
+│   ├── scripts/                     运维/测试脚本
+│   │   ├── smoke_all_features.py    全栈冒烟（API + 可选 Playwright UI）
+│   │   └── smoke_config.example.env 冒烟环境变量示例
 │   └── database/                    本地文件存储（上传 / 生成产物，不含数据表）
 ├── supabase_schema.sql              Supabase 建表脚本（users / lesson_plans / discussions / 等核心业务表）
 ├── supabase_perf_indexes.sql        Supabase 性能优化索引（复合索引 + FK 索引 + ANALYZE）
@@ -49,6 +62,15 @@ EduSymphony/
 ├── supabase_user_access_level_migration.sql RBAC（users.access_level）
 ├── supabase_safe_run.sql            可选：保守幂等加固 access_level + 索引（推荐生产复查）
 ├── supabase_admin_scope_migration.sql 可选：与管理员代管说明一致；含 RLS/PostgREST 提示与列校验
+├── supabase_user_feature_flags_migration.sql 每用户 6 个 can_* 功能开关（默认 TRUE）
+├── supabase_soft_delete_migration.sql 4 张表追加 deleted_at + 8 个 partial 索引（仅活跃行）
+├── supabase_export_records_perf_indexes.sql admin 查询用户导出列表加速（kind/status × created_at DESC）
+├── supabase_semester_helper_capability.sql 学期材料小助手开关 can_semester_helper（默认 FALSE）
+├── supabase_zhuke_export_index.sql  珠科教案 /zhuke/history 查询的 partial index（可选，性能优化）
+├── supabase_export_payment_migration.sql 付费闸门（users.export_credits/export_pay_exempt + payment_orders）
+├── supabase_textbook_ref_migration.sql 教材接地（lesson_plans.textbook_ref）
+├── vmq/                             V免签支付服务（PHP + 独立 MySQL，含 Dockerfile/vmq.sql）
+├── deploy.ps1 / deploy.bat / deploy.sh 一键全栈部署脚本（Windows / Linux）
 ├── docker-compose.yml               本地开发双容器（backend + frontend）
 ├── docker-compose.coolify.yml       生产单容器（Nginx + Supervisor）
 ├── Dockerfile                       生产单容器 Dockerfile
@@ -99,6 +121,17 @@ Phase 3: 生成优化教案（整合初步教案 + 各环节专家最佳建议�
 > - **`supabase_admin_scope_migration.sql`**：与管理员代管（应用层 `for_user_id`）对齐的说明 + 列存在校验；若库中缺少 `quota_remaining` 等会先报错，需先补齐主 schema。  
 > 若已跑过第 7 步且仅需「保险再跑一遍」，优先 `supabase_safe_run.sql`。  
 >
+> **（可选）第 9-12 步 — 新模块/能力同步（按需追加，均幂等可重跑）**  
+> 9. `supabase_user_feature_flags_migration.sql` —— 为 `users` 追加 6 个 `can_*` 布尔列（默认 TRUE），驱动管理员页的逐项功能开关  
+> 10. `supabase_soft_delete_migration.sql` —— 为 `lesson_plans` / `lesson_series` / `document_versions` / `export_records` 追加 `deleted_at` + 8 个 partial 索引（仅活跃行）  
+> 11. `supabase_export_records_perf_indexes.sql` —— admin 查询用户导出列表的两条加速索引（`user+source_kind+created` / `user+status+created`，仅 `deleted_at IS NULL`）  
+> 12. `supabase_semester_helper_capability.sql` —— 学期材料小助手开关 `users.can_semester_helper`（默认 FALSE，仅 admin 自动绕过；其他用户需管理员手动勾选才能看到入口）  
+> 13. `supabase_zhuke_export_index.sql` —— **可选**：珠科教案 `/zhuke/history` 查询的两条 partial index（按 `source_kind='zhuke_generation'` 过滤，比通用索引小 90%+），用户量大时建议执行  
+> 14. `supabase_export_payment_migration.sql` —— **付费闸门**：为 `users` 追加 `export_credits`（INT，默认 0）+ `export_pay_exempt`（BOOL，默认 false），并建 `payment_orders` 订单表 + 索引  
+> 15. `supabase_textbook_ref_migration.sql` —— **教材接地**：为 `lesson_plans` 追加 `textbook_ref`（VARCHAR(300)），记录所选 ChinaTextbook 教材/章节  
+>
+> （若从零建库直接跑 `supabase_schema.sql` 即已含以上 14/15 的列与表；上述迁移用于**已有库增量升级**。）  
+>
 > **密钥与安全**：真实数据库连接串、AI Key、`JWT_SECRET` 等只放在部署环境的 `.env`（或密钥管理）中；仓库内 `config.py` 默认值与 `.env.example` 仅为占位。**不要将生产账号、密码或 Key 写入 README、Issue 或提交到 Git。**
 
 ### 方式一：Windows 一键启动
@@ -138,6 +171,9 @@ setup.bat                            # 首次运行：创建 .venv + 安装依�
 # Windows：双击 dev_server.bat，或：
 .venv\Scripts\python.exe -m uvicorn app.main:socket_app --host 0.0.0.0 --port 3002 --reload
 ```
+
+> **珠科教案长任务**：`--reload` 会在保存 backend 代码时 kill 正在跑的 worker，导致任务卡在「排队中」。测试完整 16 节生成时建议不加 `--reload`：
+> `uvicorn app.main:socket_app --host 0.0.0.0 --port 3002`
 
 **前端（端口 3000，代理到 3002）：**
 
@@ -181,6 +217,20 @@ docker compose -f docker-compose.coolify.yml up -d --build
 - 多实例横向扩容时，`queue_jobs` 表自动在实例间分派任务（`SELECT FOR UPDATE SKIP LOCKED`），无需额外配置
 - Coolify 更新镜像失败时，使用「Force rebuild (no cache)」避免 pip 层缓存
 
+### 方式五：一键全栈部署脚本（含 V免签）
+
+仓库根目录提供一键脚本，自动起「前端 + 后端 + V免签(vmq) + V免签 MySQL(vmq-db)」全栈：
+
+```bash
+# Windows：双击 deploy.bat，或 PowerShell 执行
+./deploy.ps1        # 自动检测并启动 Docker Desktop → docker compose up -d --build → 健康检查 → 打印访问地址
+
+# Linux / 公网服务器
+bash deploy.sh      # docker compose -f docker-compose.coolify.yml up -d --build → 等待就绪 → 打印地址
+```
+
+> V免签为 PHP 服务（`vmq/`）+ 独立 MySQL（`vmq-db`），已随两个 compose 文件内置（含健康检查、初始化 `vmq/vmq.sql`）。后台默认账号见 `vmq/vmq.sql` 的 `setting` 种子（**部署后请立即改密，勿把生产账号密码写入 README/Git**）。后端容器内 `VMQ_BASE_URL` 走容器网络 `http://vmq:80`；`VMQ_NOTIFY_BASE` 填我方公网可达域名。
+
 ## 环境变量 (`.env`)
 
 本地从 `backend/` 启动时，配置写在 [`backend/.env`](backend/.env.example)（可自 [.env.example](.env.example) / [`backend/.env.example`](backend/.env.example) 复制）。使用 **docker compose** 时，Compose 读取**仓库根目录**的 [`.env`](.env.example)，键名与后端一致。前端本地开发可选变量见 [`frontend/.env.example`](frontend/.env.example)。
@@ -190,7 +240,16 @@ docker compose -f docker-compose.coolify.yml up -d --build
 | 变量 | 说明 |
 |------|------|
 | `QWEN_API_KEY` / `QWEN_MODEL` | 通义千问（默认分配给「教案优化专家」） |
+| `QWEN_VL_MODEL` | 视觉/多模态模型（立体几何「上传题目图片解题」入口用），走同一 DashScope 兼容通道；默认 `qwen-vl-max` |
+| `DOUBAO_IMAGE_MODEL` | 文生图模型（英语卡片 / 知识漫画配图）。**留空 = 关闭配图**（仅出文本）；填 Seedream 模型 id 开启（已验证 `doubao-seedream-4-0-250828`），走豆包方舟 `/images/generations` 返回 base64 内嵌进 HTML |
 | `KIMI_API_KEY` / `KIMI_MODEL` | Kimi（默认分配给「学生参与专家」） |
+| `KIMI_K2_MODEL` | 珠科教案助手专用 Kimi 模型（默认回退 `KIMI_MODEL` / `kimi-k2-0905-preview`），与 `KIMI_API_KEY` 共用密钥 |
+| `KIMI_K2_CONCURRENCY` | 珠科 `zhuke_lesson_single` 单用户并行 Kimi SubAgent 上限（默认 4，可在 `.env` 调高） |
+| `KIMI_K2_TIMEOUT_SEC` | 珠科 Kimi 单次 API 超时（秒，默认 120） |
+| `ZHUKE_LAYOUT_REVIEW_ON_LINT` | lint 失败时是否走 Kimi 排版质检（默认关） |
+| `ZHUKE_LAYOUT_REVIEW_ALWAYS` | 强制每节都走排版质检（默认关；开启后 API 调用量翻倍） |
+| `ZHUKE_LESSON_LEASE_SEC` | 珠科单课租约下限（秒）；实际取 `max(此值, TASK_TIMEOUT_SEC)`，默认 600 |
+| `SOFFICE_PATH` | LibreOffice `soffice` 绝对路径（裸机 Windows/macOS；Docker 已内置，自动探测） |
 | `DOUBAO_API_KEY` / `DOUBAO_MODEL` | 豆包 Chat（默认分配给「创新教学专家」，同时驱动课程工具的大纲/PPT/风格分析；PPT 走两阶段深度思考链路） |
 | ~~`DOUBAO_PPT_BOT_ID` / `DOUBAO_PPT_BOT_TIMEOUT`~~ | **已弃用**。早期火山方舟 PPT 智能体路线已由本地两阶段豆包深度生成取代；该变量保留只为兼容现有 `.env`，配了也不会被读取 |
 | ~~`COZE_API_KEY` / `COZE_BOT_ID` / `COZE_BASE_URL` / `COZE_PPT_TIMEOUT` / `COZE_POLL_INTERVAL`~~ | **已弃用**。Coze Bot 内置的 aippt 等第三方 PPT 插件返回的是营销页面 URL（不是真 .pptx 二进制），实测无法落地课堂可用文件，已从 `_do_ppt` 调用链中移除；保留环境变量字段仅为兼容已部署实例的 `.env`，配置不会再生效。未来如改走 Coze **Workflow** API（不是 Bot），会另起独立配置 |
@@ -220,15 +279,20 @@ docker compose -f docker-compose.coolify.yml up -d --build
 
 ### 队列与并发（Postgres-backed）
 
+> 未设置 env 时，代码按 Pooler/直连自适应默认值；Docker compose 见 `docker-compose.yml` / `docker-compose.coolify.yml` 中的 `${VAR:-default}`。
+
 | 变量 | 说明 | 默认 |
 |------|------|------|
-| `MAX_CONCURRENT_TASKS` | 单进程内 worker 协程数 = 全局最大并发 AI 任务数 | 8（compose 本地默认 5） |
-| `MAX_PER_USER_TASKS` | 单用户并发任务数上限（防刷屏） | 3 |
-| `TASK_TIMEOUT_SEC` | 单任务最长执行秒数（超时强制结束并释放名额） | 1200 |
-| `WORKER_LEASE_SEC` | worker 租约秒数（crash 后 sweeper 回队重跑） | 1800 |
-| `QUEUE_POLL_INTERVAL_MS` | 队列轮询间隔（毫秒），空闲时指数退避至 3s | 1000 |
-| `QUEUE_SWEEP_INTERVAL_SEC` | sweeper 扫描周期（秒）—— 回收超时 lease + GC | 30 |
-| `QUEUE_GC_DAYS` | 完成/失败 job 保留天数（超过被 sweeper 删除） | 7 |
+| `MAX_CONCURRENT_TASKS` | 单进程内 worker 协程数 = 全局最大并发 AI 任务数 | 代码：Pooler **4** / 直连 **10**；compose **6** |
+| `KIMI_K2_CONCURRENCY` | 珠科 `zhuke_lesson_single` 单用户并行 Kimi SubAgent 上限 | **4** |
+| `MAX_PER_USER_TASKS` | 单用户并发任务数上限（防刷屏） | 代码：Pooler **2** / 直连 **3**；compose **4** |
+| `TASK_TIMEOUT_SEC` | **默认档**单任务超时（秒）：export / material / styled_pdf 等 | 1200 |
+| `LESSON_TASK_TIMEOUT_SEC` | **教案家族**超时（秒） | 3600 |
+| `TOOL_TASK_TIMEOUT_SEC` | **课程工具**超时（秒） | 600 |
+| `WORKER_LEASE_SEC` | worker 租约秒数；教案家族租约自动取 `max(WORKER_LEASE_SEC, LESSON_TASK_TIMEOUT_SEC+300)` | 1800 |
+| `QUEUE_POLL_INTERVAL_MS` | 队列轮询间隔（毫秒），空闲时指数退避至 3s | 代码：Pooler **2000** / 直连 **1000**；compose **800** |
+| `QUEUE_SWEEP_INTERVAL_SEC` | sweeper 扫描周期（秒） | 30 |
+| `QUEUE_GC_DAYS` | 完成/失败 job 保留天数 | 代码 **7**；本地 compose **7**；Coolify compose **3** |
 
 ### 数据库连接池（可选覆盖，留空使用代码自适应）
 
@@ -242,6 +306,43 @@ docker compose -f docker-compose.coolify.yml up -d --build
 | `DB_IDLE_TX_TIMEOUT_MS` | 事务空闲超时（毫秒） | 300000 |
 | `DB_COMMAND_TIMEOUT_SEC` | asyncpg 客户端单命令超时（秒） | 180 |
 
+### 导出/下载付费闸门（V免签 + 邮件补额）
+
+普通用户每次**导出/下载任何材料**前需消耗 1 次导出额度；管理员（`lzf` / `ys`）与被管理员标记 `export_pay_exempt=true` 的白名单账号**完全豁免**。支持两种到账方式（见「付费闸门」章节）。
+
+| 变量 | 说明 | 默认 |
+|------|------|------|
+| `VMQ_BASE_URL` | V免签 PHP 服务端根地址（内网可达，如 `http://vmq:80`）。**留空 = 不启用 V免签自动确认**，仅走扫码 + 我已支付 | 空 |
+| `VMQ_KEY` | V免签通讯密钥（须与 `vmq/vmq.sql` 中 `setting.key` 一致） | 空 |
+| `VMQ_NOTIFY_BASE` | 我方公网可达回调根；V免签异步通知打到 `{此值}/api/v1/payments/vmq-notify` | 空 |
+| `EXPORT_PRICE` | 单次订单金额（元） | 5 |
+| `EXPORT_CREDITS_PER_ORDER` | 每笔成功订单发放的导出额度 | 1 |
+| `EXPORT_ORDER_TIMEOUT_SEC` | 付费订单前端轮询超时提示（秒） | 300 |
+| `EXPORT_TEMP_CREDITS` | 第二种方式「我已支付」后先发放的**临时额度**（等待人工核对补额） | 1 |
+| `ALIPAY_QR` / `WECHAT_QR` | 支付宝 / 微信收款码内容（前端展示静态码，扫码支付用） | 空 |
+| `ADMIN_PAYMENT_EMAIL` | 「我已支付」后通知人工补额的收件邮箱（备注哪个用户充值） | `778636011@qq.com` |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` | 发件 SMTP 配置（留空 = 跳过邮件通知，仅发放临时额度） | `smtp.qq.com` / `465` / 空 / 空 |
+
+### Docker compose 专用
+
+| 变量 | 说明 | 默认 |
+|------|------|------|
+| `VMQ_HTTP_PORT` | 本地 compose 映射 V免签 HTTP 端口（`host:8080 → vmq:80`） | 8080 |
+| `VMQ_DB_ROOT_PASS` | V免签 MySQL root 密码 | vmqroot123 |
+| `VMQ_DB_PASS` | V免签 MySQL 应用用户密码 | vmqpass123 |
+
+
+
+## 付费闸门（导出/下载收费）
+
+**谁需要付费**：普通用户。**豁免**：管理员 `lzf` / `ys`；以及管理员在用户管理页勾选 `export_pay_exempt` 的白名单账号。额度以 `users.export_credits` 记账，每次导出/下载扣 1；额度不足时后端返回 `402 Payment Required`，前端全局拦截并弹出 `PaymentModal`。
+
+**两种到账方式**：
+1. **V免签自动确认**（配置 `VMQ_*` 后启用）：`POST /payments/create` 下单 → 前端展示动态码 → 用户支付 → V免签回调 `/payments/vmq-notify` → 订单置 `paid` 并自动 `export_credits += EXPORT_CREDITS_PER_ORDER`。
+2. **扫码 + 我已支付（邮件补额）**（无需 V免签监控端）：前端展示静态收款码（`ALIPAY_QR` / `WECHAT_QR`）→ 用户支付后点「我已支付」→ `POST /payments/claim` 创建 `pending_review` 订单并立即发放 `EXPORT_TEMP_CREDITS` 临时额度，同时给 `ADMIN_PAYMENT_EMAIL` 发邮件 → 管理员核对后在后台 `POST /payments/{id}/confirm` 正式补额。同一用户存在未确认 `pending_review` 订单时不再重复发放。
+
+**相关表/列**：`users.export_credits`、`users.export_pay_exempt`、`payment_orders`（执行 `supabase_export_payment_migration.sql`）。**V免签服务**：见仓库 `vmq/`（PHP + 独立 MySQL），随 `docker compose` 一起起（`vmq` / `vmq-db` 两个 service，含健康检查）。
+
 
 
 ## 并发、队列与数据库性能
@@ -251,13 +352,40 @@ docker compose -f docker-compose.coolify.yml up -d --build
 - **Postgres 持久化队列** (`backend/app/tasks/queue_manager.py`)：
   - 任务写入 `queue_jobs` 表，`SELECT FOR UPDATE SKIP LOCKED` 抢锁，天然支持**多进程 / 多实例共享**
   - 全局并发 `MAX_CONCURRENT_TASKS` + 单用户限流 `MAX_PER_USER_TASKS`
-  - `WORKER_LEASE_SEC` + sweeper 循环自动回收 crashed worker 名额、GC 过期 job
+  - **按任务类型分档超时**：`_timeout_for_kind(kind)` 让教案家族用 `LESSON_TASK_TIMEOUT_SEC`（默认 3600s，防长任务误杀）、课程工具用 `TOOL_TASK_TIMEOUT_SEC`（默认 600s，快恢复）、其余用 `TASK_TIMEOUT_SEC`（1200s）
+  - **租约 ≥ 超时**：认领 SQL 对教案家族取 `max(WORKER_LEASE_SEC, LESSON_TASK_TIMEOUT_SEC+300)` 作为 lease，避免 sweeper 在长教案仍在跑时提前回收导致重复执行
+  - **worker claim 过滤**：只认领本实例已注册 handler 的 `kind`（`kind = ANY(:kinds)`），避免旧实例抢走新类型任务后报 no handler
+  - **自恢复**：`WORKER_LEASE_SEC` + sweeper 循环自动回收 crashed worker 名额、GC 过期 job；启动 `_cleanup_stale_tasks_on_boot` 清僵尸；sweeper 每 30s 同步 `lesson_plans` / `course_tool_results`（pending/running 但队列已失败的行标失败），并跑 zhuke watchdog
+  - **手动兜底**：`backend/scripts/clear_stuck_queue.py` 可一次性清理卡死的队列 job（覆盖 lesson 家族 + tool_* 含 comic/cards）
   - 重启后进行中的任务会被自动重新拉起（lease 过期后回到 queued）
+  - `GET /api/v1/system/queue`（含 `get_stats`）返回各档超时与租约，便于排查
 - **队列状态推送**：Socket.IO `queue_position` 事件实时推送排队位置与运行 / 排队数量
 - **APScheduler**：线程池扩容至 10 workers，`misfire_grace_time=300s`
 - **性能索引**：`supabase_perf_indexes.sql` + `supabase_queue_migration.sql` 覆盖 user/status/created_at、lesson/stage、course_tool、queue_jobs 等高频查询
 - **游标分页**：`GET /api/v1/lessons?cursor=<ISO 时间>` 性能恒定 O(limit)，替代大 OFFSET 深分页
 - **横向扩容**：队列已持久化到 Supabase，直接启动多个后端容器/实例即可共享任务，无需 Redis
+
+## 冒烟测试（API + 可选 UI）
+
+仓库提供全栈冒烟脚本 [`backend/scripts/smoke_all_features.py`](backend/scripts/smoke_all_features.py)，默认 **dry-run**（不触发 AI 长任务入队），覆盖主要 API 路由与教学材料 HTML 质量校验；加 `--ui` 时用 Playwright 点击各页面关键按钮。
+
+配置示例见 [`backend/scripts/smoke_config.example.env`](backend/scripts/smoke_config.example.env)（可复制到 `backend/` 旁或通过环境变量注入）。
+
+```bash
+cd backend
+
+# 仅 API（约 30 秒，需后端 3002 已启动）
+python scripts/smoke_all_features.py --dry-run --password YOUR_PASS
+
+# API + UI 按钮（需前端 3000 + Playwright）
+pip install playwright
+playwright install chromium
+python scripts/smoke_all_features.py --dry-run --ui --password YOUR_PASS --lesson-id <uuid>
+
+# 输出 smoke_report.json；有任何 FAIL 时 exit code = 1
+```
+
+也可通过环境变量：`SMOKE_BASE_URL`、`SMOKE_FRONTEND_URL`、`SMOKE_USER`、`SMOKE_PASS`、`SMOKE_LESSON_ID`。
 
 ## 环境要求
 
@@ -266,6 +394,13 @@ docker compose -f docker-compose.coolify.yml up -d --build
 - 一个 Supabase 项目（免费版即可）
 - 至少配置一个 AI 模型的 API Key
 - **Docker（可选，用于方式三 / 四）**：Docker Engine **24+**（或旧版需开启 **BuildKit**）、**Compose V2**（`docker compose`）；镜像构建建议 **4GB+** 内存；Windows 推荐 Docker Desktop + **WSL2**
+- **LibreOffice（珠科教案 PDF 必须）**：珠科教案助手的 docx → pdf 真格式转换需要系统 `soffice` 可执行文件。**Docker 用户无需操作** —— `docker compose build` 时 `backend/Dockerfile` 和根 `Dockerfile` 会通过 apt 自动安装 `libreoffice-writer` + 中文字体 3 件套，并在构建期执行 `soffice --version` 校验（装不上则 build 失败）；部署后可 `curl /health` 确认 `"libreoffice": true`。**仅本地裸跑 Windows / macOS** 需手动装（详见 [`backend/requirements.txt`](backend/requirements.txt) 顶部系统依赖说明）：
+  - Windows (winget，推荐): `winget install --id TheDocumentFoundation.LibreOffice --accept-package-agreements --accept-source-agreements`
+  - Windows (手动): 从 https://www.libreoffice.org/download/ 下载 LibreOffice Community 安装包（约 350MB），默认安装到 `C:\Program Files\LibreOffice\`，后端 `_find_soffice()` 会自动检测；装完不需重启后端，下次 PDF 请求即生效
+  - macOS: `brew install --cask libreoffice`
+  - Linux: `apt install libreoffice-writer fonts-wqy-zenhei fonts-noto-cjk`
+  - 非默认路径：设置环境变量 `SOFFICE_PATH` 指向 `soffice` 可执行文件
+  - 未装时 `/zhuke/{rid}/download?format=pdf` 返 503 + 中文 actionable 提示，前端 toast 原样显示；用户仍可下载 docx 后用 Word 自己另存为 PDF
 
 ## 数据库
 
@@ -353,6 +488,8 @@ docker compose -f docker-compose.coolify.yml up -d --build
 | 系列教案 | `/series` | 学期规划 & 批量生成同一课程系列 |
 | 大学教案 | `/university` | 大学专用：单节/多周/整学期教案（Qwen）+ 可选习题实操（DeepSeek）+ 合并/分 ZIP 导出 |
 | 模板 AI 填写 | `/template-fill` | 上传 docx/pptx/xlsx/txt/md 模板 + 描述内容，Qwen 识别占位符后填入，保留原排版，支持跨格式导出 |
+| 学期材料小助手 | `/semester-helper` | 学期材料小助手 hub（受 `can_semester_helper` 控制；admin 默认绕过，其他用户需管理员勾选才显示） |
+| 珠科教案助手 | `/semester-helper/zhuke` | 上传珠科教学日历 xlsx/docx → 解析封面+逐节主题 → Kimi K2.6 生成教学目标/重难点/教学过程 → 按珠科模板组装 docx/pdf 下载 |
 
 右上角有 **语言切换器** (zh-CN / zh-TW / en)，所有 UI 文案 + AI 生成内容均会跟随切换；顶部有**系统公告 Banner**。
 
@@ -429,8 +566,23 @@ docker compose -f docker-compose.coolify.yml up -d --build
 | POST | `/api/v1/course-tools/ppt` | 生成 PPT（**本地两阶段豆包深度生成**：① 第一阶段调用豆包 Chat 产出 15-25 页 PPT 大纲骨架，含每页布局/标题/聚焦点；② 第二阶段以 `_PPT_PAGE_CONCURRENCY=8` 并发为每一页深度生成富文本要点（25-50 字/条）+ 80-200 字主讲稿，再用 `python-pptx` 的 12 种内置版式本地渲染。`_engine` 字段标注通道：`doubao_two_stage` / `doubao_single_shot`（两阶段失败时回退） |
 | POST | `/api/v1/course-tools/exercises` | 生成习题 / 日常作业 |
 | POST | `/api/v1/course-tools/practice` | 生成课堂练习 / 实操 |
+| POST | `/api/v1/course-tools/comic` | 生成知识漫画（分镜脚本 → HTML；`with_images` 开启豆包配图） |
+| POST | `/api/v1/course-tools/cards` | 生成英语学习卡片（结构化单词卡 HTML；`with_images` 开启豆包配图） |
 | GET | `/api/v1/course-tools/history` | 历史记录列表 |
-| GET | `/api/v1/course-tools/:id/download` | 下载生成文件 |
+| GET | `/api/v1/course-tools/:id/download` | 下载生成文件（受付费闸门保护） |
+
+### 付费/额度
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/payments/config` | 获取付费参数（金额、额度、收款码内容） |
+| POST | `/api/v1/payments/create` | 创建 V免签订单（返回支付二维码/链接） |
+| GET | `/api/v1/payments/:id/status` | 轮询订单状态 |
+| GET | `/api/v1/payments/vmq-notify` | V免签异步回调（置 paid + 发放额度） |
+| POST | `/api/v1/payments/claim` | 「我已支付」：发放临时额度 + 邮件通知人工补额 |
+| POST | `/api/v1/payments/:id/confirm` | 管理员确认订单（人工补额） |
+| POST | `/api/v1/payments/consume` | 前端客户端直连下载时消耗 1 次导出额度 |
+| GET | `/api/v1/payments/orders` | 订单列表（管理员） |
 
 ### 讨论
 

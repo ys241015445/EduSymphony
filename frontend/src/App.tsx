@@ -17,10 +17,15 @@ import UniversityDashboard from './pages/UniversityDashboard'
 import TemplateFill from './pages/TemplateFill'
 import DocumentsLibrary from './pages/DocumentsLibrary'
 import DocumentEditor from './pages/DocumentEditor'
-import { parseAccessLevel, isLimited, isAdmin } from './lib/access'
+import SemesterHelper from './pages/SemesterHelper'
+import ZhukeLessonPlan from './pages/ZhukeLessonPlan'
+import ZhukeHistory from './pages/ZhukeHistory'
+import { parseAccessLevel, isLimited, isAdmin, hasCapability, type CapabilityFlag } from './lib/access'
 import AdminUsers from './pages/AdminUsers'
 import AdminUserStorage from './pages/AdminUserStorage'
+import AdminUserExports from './pages/AdminUserExports'
 import { Toaster } from './components/ui/Toast'
+import PaymentModal from './components/PaymentModal'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const token = useAuthStore((s) => s.token)
@@ -44,11 +49,20 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+function CapabilityRoute({ flag, children }: { flag: CapabilityFlag; children: React.ReactNode }) {
+  const user = useAuthStore((s) => s.user)
+  if (!hasCapability(user as any, flag)) {
+    return <Navigate to="/dashboard" replace />
+  }
+  return <>{children}</>
+}
+
 export default function App() {
   return (
     <>
     <Banner />
     <Toaster />
+    <PaymentModal />
     <Routes>
       <Route path="/" element={<Landing />} />
       <Route path="/login" element={<Auth />} />
@@ -96,7 +110,9 @@ export default function App() {
         path="/series/new"
         element={
           <ProtectedRoute>
-            <SeriesCreate />
+            <CapabilityRoute flag="can_series">
+              <SeriesCreate />
+            </CapabilityRoute>
           </ProtectedRoute>
         }
       />
@@ -113,7 +129,9 @@ export default function App() {
         element={
           <ProtectedRoute>
             <LimitedRoute>
-              <CourseToolsLibrary />
+              <CapabilityRoute flag="can_course_tools">
+                <CourseToolsLibrary />
+              </CapabilityRoute>
             </LimitedRoute>
           </ProtectedRoute>
         }
@@ -123,7 +141,9 @@ export default function App() {
         element={
           <ProtectedRoute>
             <LimitedRoute>
-              <CourseTools />
+              <CapabilityRoute flag="can_course_tools">
+                <CourseTools />
+              </CapabilityRoute>
             </LimitedRoute>
           </ProtectedRoute>
         }
@@ -132,7 +152,9 @@ export default function App() {
         path="/university/new"
         element={
           <ProtectedRoute>
-            <UniversityCreate />
+            <CapabilityRoute flag="can_university">
+              <UniversityCreate />
+            </CapabilityRoute>
           </ProtectedRoute>
         }
       />
@@ -149,8 +171,34 @@ export default function App() {
         element={
           <ProtectedRoute>
             <LimitedRoute>
-              <TemplateFill />
+              <CapabilityRoute flag="can_template_fill">
+                <TemplateFill />
+              </CapabilityRoute>
             </LimitedRoute>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/semester-helper"
+        element={
+          <ProtectedRoute>
+            <SemesterHelper />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/semester-helper/zhuke"
+        element={
+          <ProtectedRoute>
+            <ZhukeLessonPlan />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/semester-helper/zhuke/history"
+        element={
+          <ProtectedRoute>
+            <ZhukeHistory />
           </ProtectedRoute>
         }
       />
@@ -160,6 +208,16 @@ export default function App() {
           <ProtectedRoute>
             <AdminRoute>
               <AdminUserStorage />
+            </AdminRoute>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/admin/users/:userId/exports"
+        element={
+          <ProtectedRoute>
+            <AdminRoute>
+              <AdminUserExports />
             </AdminRoute>
           </ProtectedRoute>
         }

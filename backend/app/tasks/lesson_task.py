@@ -12,6 +12,9 @@ from app.core.database import async_session_maker
 from app.models.lesson import LessonPlan, Discussion, LessonStatus
 from app.services.ai_service import AIService
 from app.services.memory_service import MemoryService
+from app.services import k12_skills as _k12_skills
+from app.services import teacher_standard as _teacher_standard
+from app.services import special_ed_skills as _special_ed
 
 AGENT_ROLES = [
     {
@@ -443,6 +446,36 @@ def _locale_hint(lesson: LessonPlan) -> str:
     return LOCALE_INSTRUCTION.get(getattr(lesson, "locale", None) or "zh-CN", "")
 
 
+def _k12_hint(lesson: LessonPlan) -> str:
+    """K12 教案：追加 k12-teacher-skills 蒸馏的教学法指南；大学等非 K12 返回空。"""
+    if not _k12_skills.is_k12(getattr(lesson, "education_level", None)):
+        return ""
+    return "\n\n" + _k12_skills.lesson_skills(getattr(lesson, "locale", None) or "zh-CN")
+
+
+def _special_ed_hint(lesson: LessonPlan) -> str:
+    """特殊教育类教案：关键词命中则追加特教专项标准；否则返回空。"""
+    if not _special_ed.is_special_ed(
+        subject=getattr(lesson, "subject", None),
+        grade_level=getattr(lesson, "grade_level", None),
+        topic=getattr(lesson, "topic", None),
+        title=getattr(lesson, "title", None),
+        student_type=getattr(lesson, "student_type", None),
+    ):
+        return ""
+    return "\n\n" + _special_ed.lesson_skills(getattr(lesson, "locale", None) or "zh-CN")
+
+
+def _agent_baseline(lesson: LessonPlan) -> str:
+    """所有内容创作 agent 的统一基线：通用教学标准（常开）+ K12 额外增强（仅 K12）
+    + 特殊教育专项标准（仅特教类命中时）。"""
+    locale = getattr(lesson, "locale", None) or "zh-CN"
+    text = "\n\n" + _teacher_standard.standard(locale)
+    text += _k12_hint(lesson)
+    text += _special_ed_hint(lesson)
+    return text
+
+
 def _progress_msg(key: str, locale: str, **kwargs) -> str:
     """Return a locale-aware progress message for socket events."""
     _MSGS: Dict[str, Dict[str, str]] = {
@@ -681,6 +714,25 @@ def _build_context(lesson: LessonPlan, parent_content: str = "") -> str:
         if parent_content:
             parts.append(f"\n【上一课教案摘要】:\n{parent_content[:2000]}")
         parts.append(f"\n教案内容:\n{(lesson.parsed_content or lesson.source_content or '')[:3000]}")
+
+    # 教材接地（ChinaTextbook）：对齐教师所选教材版本/章节
+    tb = getattr(lesson, "textbook_ref", None)
+    if tb:
+        if locale == "en":
+            parts.append(
+                f"\n[Textbook] {tb} — align to this textbook's concept order and terminology; "
+                f"do NOT copy textbook text verbatim, rewrite in your own words."
+            )
+        elif locale == "zh-TW":
+            parts.append(
+                f"\n【教材版本/章節】{tb}——請對齊該教材的知識點順序與術語；"
+                f"不得照抄教材原文，用自己的話重寫。"
+            )
+        else:
+            parts.append(
+                f"\n【教材版本/章节】{tb}——请对齐该教材的知识点顺序与术语；"
+                f"不得照抄教材原文，用自己的话重写。"
+            )
     return "\n".join(parts)
 
 
@@ -1687,6 +1739,7 @@ AI教師
             sys_msg = f"你是資深教案編寫專家，精通{model_names_str}，熟悉澳門地區教育政策和教青局基本學力要求。請用繁體中文基於該教學模型生成完整教案，不使用Markdown格式。"
         elif is_macau and lesson_locale == "en":
             sys_msg = f"You are an expert lesson plan writer proficient in {model_names_str}, familiar with Macau education policies. Generate a complete lesson plan in English. No Markdown formatting."
+        sys_msg = sys_msg + _agent_baseline(lesson)
 
         full_text = ""
         chunk_count = 0
@@ -1836,6 +1889,7 @@ AI教師
             locale_hint_opt = _locale_hint(lesson)
             sys_msg = f"你是教研讨论主持人，精通{model_names_str}。请整合优化内容生成完整教案文档，不要使用Markdown格式。{locale_hint_opt}"
 
+        sys_msg = sys_msg + _agent_baseline(lesson)
         full_text = ""
         chunk_count = 0
         writer_provider = _writer_provider(lesson)
@@ -1924,7 +1978,7 @@ AI教師
 - {'使用繁体中文，遵循澳门教案要求' if is_macau else '语言精炼专业'}
 - 不使用任何Markdown标记，直接输出纯文本"""
 
-        sys_msg = f"你是资深教案编写专家，熟练掌握{model_names_str}等教学模型。请直接输出纯文本，不要使用Markdown格式。{_locale_hint(lesson)}"
+        sys_msg = f"你是资深教案编写专家，熟练掌握{model_names_str}等教学模型。请直接输出纯文本，不要使用Markdown格式。{_locale_hint(lesson)}" + _agent_baseline(lesson)
 
         full_text = ""
         writer_provider = _writer_provider(lesson)
@@ -2043,7 +2097,7 @@ AI教師
             prompt += f"\n\n{pl['macau_note']}"
         prompt += f"\n{pl['format_note']}"
 
-        sys_msg = pl["analyze_sys"].format(specialty=agent_specialty, theories=agent_theories) + _locale_hint(lesson)
+        sys_msg = pl["analyze_sys"].format(specialty=agent_specialty, theories=agent_theories) + _locale_hint(lesson) + _agent_baseline(lesson)
 
         full_text = ""
         try:
@@ -2380,7 +2434,7 @@ AI教師
 7. {'使用繁体中文，遵循澳门教案格式要求，确保包含目标代号、时间、教学资源、评量等要素' if is_macau else '语言精炼专业'}
 8. 不使用任何Markdown标记，直接输出纯文本"""
 
-        sys_msg = f"你是资深教案编写专家，熟练掌握{model_names_str}等教学模型。请直接输出纯文本，不要使用Markdown格式。{_locale_hint(lesson)}"
+        sys_msg = f"你是资深教案编写专家，熟练掌握{model_names_str}等教学模型。请直接输出纯文本，不要使用Markdown格式。{_locale_hint(lesson)}" + _agent_baseline(lesson)
 
         full_text = ""
         writer_provider = _writer_provider(lesson)

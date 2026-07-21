@@ -55,6 +55,26 @@ class LessonResponse(BaseModel):
         from_attributes = True
 
 
+class LessonStatusResponse(BaseModel):
+    """Lightweight poll payload — no full_draft / full_optimized / stages bodies."""
+
+    id: str
+    status: str
+    progress: int
+    current_stage: int = 0
+    current_phase: Optional[str] = None
+    error_message: Optional[str] = None
+    material_draft_status: Optional[str] = None
+    material_optimized_status: Optional[str] = None
+    styled_pdf_status: Optional[str] = None
+    has_full_draft: bool = False
+    has_full_optimized: bool = False
+    has_stages: bool = False
+
+    class Config:
+        from_attributes = True
+
+
 class LessonListResponse(BaseModel):
     id: str
     title: str

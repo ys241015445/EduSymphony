@@ -1,9 +1,10 @@
 """PPT rendering service using python-pptx with rich layouts and template metadata.
 
-Supported layouts (12):
+Supported layouts (16):
     title_slide | section_header | agenda | content |
     two_column | comparison | timeline | process_steps |
-    quote | callout | stats | closing
+    quote | callout | stats | closing |
+    big_number | quadrant | checklist | definition
 
 Template metadata shape (all optional, resolved with sensible defaults):
     {
@@ -458,6 +459,123 @@ def _render_stats(prs, sd, pal, tpl):
     _attach_notes(slide, sd.get("notes", ""))
 
 
+# ── Renderers: 4 new layouts distilled from open-source PPT skills ───────
+# big_number / quadrant / checklist / definition —— 强化数据、分类、清单、概念表达。
+
+def _render_big_number(prs, sd, pal, tpl):
+    """One hero number + short interpretation + optional supporting bullets."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _set_bg(slide, pal["bg"])
+    fonts = _resolve_fonts(tpl)
+    _title_bar(slide, sd.get("title", ""), pal, fonts)
+
+    number = str(sd.get("big_number") or "").strip()
+    if not number:
+        stats = [s for s in (sd.get("stats") or []) if isinstance(s, dict)]
+        if stats:
+            number = str(stats[0].get("value", ""))
+    label = sd.get("big_label") or sd.get("subtitle") or ""
+    if not label:
+        stats = [s for s in (sd.get("stats") or []) if isinstance(s, dict)]
+        if stats:
+            label = str(stats[0].get("label", ""))
+
+    _add_text_box(slide, Inches(0.8), Inches(2.0), Inches(11.7), Inches(2.2),
+                  number[:12], 130, pal["accent"], bold=True,
+                  alignment=PP_ALIGN.CENTER, font_name=fonts["title"])
+    if label:
+        _add_text_box(slide, Inches(1.5), Inches(4.4), Inches(10.3), Inches(1.0),
+                      str(label)[:60], 24, pal["title_color"], bold=True,
+                      alignment=PP_ALIGN.CENTER, font_name=fonts["title"])
+    bullets = [b for b in (sd.get("bullets") or []) if b]
+    if bullets:
+        _bullet_list(slide, bullets[:3], Inches(2.4), Inches(5.5),
+                     Inches(8.5), Inches(1.7), pal, fonts, font_size=15)
+    _attach_notes(slide, sd.get("notes", ""))
+
+
+def _render_quadrant(prs, sd, pal, tpl):
+    """2x2 matrix; reads `quadrants` (4 items) or falls back to steps/bullets."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _set_bg(slide, pal["bg"])
+    fonts = _resolve_fonts(tpl)
+    _title_bar(slide, sd.get("title", ""), pal, fonts)
+
+    quads = [q for q in (sd.get("quadrants") or []) if isinstance(q, dict)]
+    if not quads:
+        steps = [s for s in (sd.get("steps") or []) if isinstance(s, dict)]
+        quads = steps[:4]
+    if not quads:
+        bullets = [b for b in (sd.get("bullets") or []) if b][:4]
+        quads = [{"name": "", "desc": b} for b in bullets]
+    quads = (quads + [{}, {}, {}, {}])[:4]
+
+    positions = [
+        (Inches(0.8), Inches(1.9)), (Inches(6.9), Inches(1.9)),
+        (Inches(0.8), Inches(4.5)), (Inches(6.9), Inches(4.5)),
+    ]
+    card_w, card_h = Inches(5.6), Inches(2.4)
+    accents = [pal["accent"], pal["bullet_color"], pal["bullet_color"], pal["accent"]]
+    for (x, y), q, acc in zip(positions, quads, accents):
+        _add_rect(slide, x, y, card_w, card_h,
+                  fill_color=pal["section_bg"], line_color=acc)
+        name = str(q.get("name", "") or "")[:24]
+        if name:
+            _add_text_box(slide, x + Inches(0.25), y + Inches(0.15), card_w - Inches(0.5),
+                          Inches(0.6), name, 18, acc, bold=True, font_name=fonts["title"])
+        desc = str(q.get("desc", "") or "")[:110]
+        if desc:
+            _add_text_box(slide, x + Inches(0.25), y + Inches(0.85), card_w - Inches(0.5),
+                          Inches(1.4), desc, 14, pal["body_color"], font_name=fonts["body"])
+    _attach_notes(slide, sd.get("notes", ""))
+
+
+def _render_checklist(prs, sd, pal, tpl):
+    """Checkmark list for review pages / rules / reminders."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _set_bg(slide, pal["bg"])
+    fonts = _resolve_fonts(tpl)
+    _title_bar(slide, sd.get("title", ""), pal, fonts)
+
+    items = [b for b in (sd.get("bullets") or []) if b][:7]
+    top = Inches(1.9)
+    for i, item in enumerate(items):
+        y = top + Inches(i * 0.75)
+        box = _add_rect(slide, Inches(1.0), y, Inches(0.45), Inches(0.45),
+                        fill_color=pal["accent"])
+        _add_text_box(slide, Inches(1.0), y - Inches(0.02), Inches(0.45), Inches(0.5),
+                      "✓", 20, pal["bg"], bold=True,
+                      alignment=PP_ALIGN.CENTER, font_name=fonts["title"])
+        _add_text_box(slide, Inches(1.7), y - Inches(0.02), Inches(10.6), Inches(0.6),
+                      str(item)[:80], 18, pal["body_color"], font_name=fonts["body"])
+    _attach_notes(slide, sd.get("notes", ""))
+
+
+def _render_definition(prs, sd, pal, tpl):
+    """Term + precise definition emphasised, with optional expansion bullets."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _set_bg(slide, pal["bg"])
+    fonts = _resolve_fonts(tpl)
+    _title_bar(slide, sd.get("title", ""), pal, fonts)
+
+    term = sd.get("term") or sd.get("subtitle") or ""
+    definition = sd.get("definition") or ""
+    _add_rect(slide, Inches(0.8), Inches(1.9), Inches(11.7), Inches(2.4),
+              fill_color=pal["section_bg"], line_color=pal["accent"])
+    _add_line(slide, Inches(0.8), Inches(1.9), Pt(8), Inches(2.4), pal["accent"])
+    if term:
+        _add_text_box(slide, Inches(1.2), Inches(2.15), Inches(11), Inches(0.8),
+                      str(term)[:40], 30, pal["accent"], bold=True, font_name=fonts["title"])
+    if definition:
+        _add_text_box(slide, Inches(1.2), Inches(3.0), Inches(11), Inches(1.2),
+                      str(definition)[:160], 18, pal["title_color"], font_name=fonts["body"])
+    bullets = [b for b in (sd.get("bullets") or []) if b]
+    if bullets:
+        _bullet_list(slide, bullets[:4], Inches(1.0), Inches(4.6),
+                     Inches(11.3), Inches(2.6), pal, fonts, font_size=16)
+    _attach_notes(slide, sd.get("notes", ""))
+
+
 # ── Dispatch + public entrypoints ───────────────────────────────────────
 
 _LAYOUT_RENDERERS = {
@@ -472,6 +590,10 @@ _LAYOUT_RENDERERS = {
     "quote":         _render_quote,
     "callout":       _render_callout,
     "stats":         _render_stats,
+    "big_number":    _render_big_number,
+    "quadrant":      _render_quadrant,
+    "checklist":     _render_checklist,
+    "definition":    _render_definition,
     "closing":       _render_closing_slide,
 }
 
