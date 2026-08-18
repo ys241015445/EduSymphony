@@ -1,5 +1,9 @@
 # Secrets: pass via compose `env_file` or orchestrator env; do not bake credentials into layers.
 # Base image: python:3.11-slim-bookworm — pair with Docker Engine 24+ / Compose V2.
+# 导出付费：静态收款码 + SMTP（无 V免签）；珠科材料助手依赖 DEEPSEEK_API_KEY。
+# 运行期模型由 env 注入（默认见仓库根 / backend `.env.example`）：
+#   qwen3.8-max / qwen3.7-plus / kimi-k2.6 / doubao-seed-2-1-pro-260628 /
+#   deepseek-v4-pro / 4.0Ultra
 # 固定 -bookworm（Debian 12）：避免滚动 tag 跳到 trixie 后与下方阿里云
 # bookworm sources.list 不一致而回落到 deb.debian.org（国内连接极不稳定）
 FROM python:3.11-slim-bookworm

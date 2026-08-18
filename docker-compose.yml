@@ -7,8 +7,6 @@
 # │   powershell -ExecutionPolicy Bypass -File .\deploy.ps1            │
 # │ 或手动等价命令：                                                    │
 # │   docker compose up -d --build                                     │
-# │ 只起 V免签（继续用本机 uvicorn 后端）：                              │
-# │   docker compose up -d --build vmq-db vmq                          │
 # └──────────────────────────────────────────────────────────────────┘
 #
 # Use Docker Compose V2: `docker compose` (not legacy `docker-compose` binary).
@@ -16,11 +14,12 @@
 # (enabled by default on Docker Desktop; Linux: DOCKER_BUILDKIT=1).
 #
 # Secrets: copy `.env.example` at repo root to `.env` and fill DATABASE_URL / API keys.
-# VMQ_HTTP_PORT / VMQ_DB_ROOT_PASS / VMQ_DB_PASS 可在根 `.env` 覆盖（见 .env.example）。
 # Never commit `.env` or paste production passwords into docs or source defaults.
 #
 # backend 镜像构建时 apt 自动安装 LibreOffice（libreoffice-writer）+ 中文字体，
 # 并在 Dockerfile 内 `soffice --version` 校验；珠科教案 PDF 下载开箱即用。
+#
+# 导出付费：静态收款码 + 邮件通知管理员 + 管理后台改额度（无第三方支付服务）。
 
 services:
   backend:
@@ -34,19 +33,15 @@ services:
     env_file:
       - .env
     environment:
-      # ─── 视觉/多模态模型（立体几何「上传题目图片解题」入口） ───
-      # 走 DashScope 兼容通道，复用 QWEN_API_KEY / QWEN_BASE_URL；.env 未配则用默认
-      QWEN_VL_MODEL:             ${QWEN_VL_MODEL:-qwen-vl-max}
-      # 文生图模型（英语卡片/知识漫画配图，走豆包方舟）。留空=关闭配图（纯文字）
+      # ─── 主力模型默认（与 .env.example / config.py 对齐；可用 .env 覆盖） ───
+      QWEN_MODEL:                ${QWEN_MODEL:-qwen3.8-max}
+      QWEN_VL_MODEL:             ${QWEN_VL_MODEL:-qwen3.7-plus}
+      KIMI_MODEL:                ${KIMI_MODEL:-kimi-k2.6}
+      KIMI_K2_MODEL:             ${KIMI_K2_MODEL:-kimi-k2.6}
+      DOUBAO_MODEL:              ${DOUBAO_MODEL:-doubao-seed-2-1-pro-260628}
       DOUBAO_IMAGE_MODEL:        ${DOUBAO_IMAGE_MODEL:-}
-      # V免签（容器内用服务名访问；回调走容器内 backend:8000）
-      VMQ_BASE_URL:              http://vmq:80
-      VMQ_NOTIFY_BASE:           ${VMQ_NOTIFY_BASE:-http://backend:8000}
+      SPARK_MODEL:               ${SPARK_MODEL:-4.0Ultra}
       # ─── ⚠️ DEPRECATED：方舟 PPT 智能体 / Coze Bot 已从 _do_ppt 移除 ───
-      # PPT 生成已统一切换为「本地两阶段豆包深度生成 + python-pptx 渲染」，
-      # 只依赖 DOUBAO_API_KEY + DOUBAO_MODEL（在 .env 文件里）即可。
-      # 下面这几行保留只是为了不让老 .env 报 "undefined variable" 警告，
-      # 应用层不会真正读它们；想干净的话可以直接整段删掉。
       DOUBAO_PPT_BOT_ID:         ${DOUBAO_PPT_BOT_ID:-}
       DOUBAO_PPT_BOT_TIMEOUT:    ${DOUBAO_PPT_BOT_TIMEOUT:-180}
       COZE_API_KEY:              ${COZE_API_KEY:-}
@@ -54,7 +49,6 @@ services:
       COZE_BASE_URL:             ${COZE_BASE_URL:-https://api.coze.cn}
       COZE_PPT_TIMEOUT:          ${COZE_PPT_TIMEOUT:-300}
       COZE_POLL_INTERVAL:        ${COZE_POLL_INTERVAL:-2.0}
-      # ─── Postgres-backed 持久化队列（支持重启恢复） ───
       MAX_CONCURRENT_TASKS:      ${MAX_CONCURRENT_TASKS:-6}
       MAX_PER_USER_TASKS:        ${MAX_PER_USER_TASKS:-4}
       TASK_TIMEOUT_SEC:          ${TASK_TIMEOUT_SEC:-1200}
@@ -64,9 +58,24 @@ services:
       QUEUE_POLL_INTERVAL_MS:    ${QUEUE_POLL_INTERVAL_MS:-800}
       QUEUE_SWEEP_INTERVAL_SEC:  ${QUEUE_SWEEP_INTERVAL_SEC:-30}
       QUEUE_GC_DAYS:             ${QUEUE_GC_DAYS:-7}
-      # 连接池与 6 worker 配套（显式放开，避免 pooled 自动上限 10）
       DB_POOL_SIZE:              ${DB_POOL_SIZE:-16}
       DB_MAX_OVERFLOW:           ${DB_MAX_OVERFLOW:-6}
+      # ─── 导出付费闸门（扫码 + 邮件；无第三方支付） ───
+      EXPORT_PRICE:              ${EXPORT_PRICE:-5}
+      EXPORT_CREDITS_PER_ORDER:  ${EXPORT_CREDITS_PER_ORDER:-1}
+      EXPORT_ORDER_TIMEOUT_SEC:  ${EXPORT_ORDER_TIMEOUT_SEC:-300}
+      EXPORT_TEMP_CREDITS:       ${EXPORT_TEMP_CREDITS:-1}
+      ADMIN_PAYMENT_EMAIL:       ${ADMIN_PAYMENT_EMAIL:-}
+      ALIPAY_QR:                 ${ALIPAY_QR:-}
+      WECHAT_QR:                 ${WECHAT_QR:-}
+      SMTP_HOST:                 ${SMTP_HOST:-smtp.qq.com}
+      SMTP_PORT:                 ${SMTP_PORT:-465}
+      SMTP_USER:                 ${SMTP_USER:-}
+      SMTP_PASS:                 ${SMTP_PASS:-}
+      # ─── 珠科材料助手（DeepSeek） ───
+      DEEPSEEK_API_KEY:          ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL:            ${DEEPSEEK_MODEL:-deepseek-v4-pro}
+      ZHUKE_MATERIALS_DEEPSEEK_MODEL: ${ZHUKE_MATERIALS_DEEPSEEK_MODEL:-deepseek-v4-pro}
     volumes:
       - ./backend/database:/app/database
     restart: unless-stopped
@@ -90,46 +99,3 @@ services:
       backend:
         condition: service_healthy
     restart: unless-stopped
-
-  # V免签数据库（独立 MySQL，与 Supabase 隔离）
-  vmq-db:
-    image: mysql:5.7
-    environment:
-      MYSQL_ROOT_PASSWORD: ${VMQ_DB_ROOT_PASS:-vmqroot123}
-      MYSQL_DATABASE: vmq
-      MYSQL_USER: vmq
-      MYSQL_PASSWORD: ${VMQ_DB_PASS:-vmqpass123}
-    volumes:
-      - vmq_db_data:/var/lib/mysql
-      # 首次启动自动导入建表 + 预置的 setting（后台账号 lzf、密钥、两张收款码）
-      - ./vmq/vmq.sql:/docker-entrypoint-initdb.d/vmq.sql:ro
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${VMQ_DB_ROOT_PASS:-vmqroot123}"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-      start_period: 30s
-    restart: unless-stopped
-
-  # V免签（个人收款监控，xsidc/Vmqphp）—— 导出付费闸门用。
-  # 后台 http://localhost:8080 ，账号 lzf / lzf122406!（已预置）。
-  # 手机装 V免签监控端 App 指向本服务；后端 .env 已设 VMQ_BASE_URL=http://vmq:80、VMQ_KEY。
-  vmq:
-    build: ./vmq
-    depends_on:
-      vmq-db:
-        condition: service_healthy
-    expose:
-      - "80"
-    ports:
-      - "${VMQ_HTTP_PORT:-8080}:80"
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost/"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 40s
-    restart: unless-stopped
-
-volumes:
-  vmq_db_data:

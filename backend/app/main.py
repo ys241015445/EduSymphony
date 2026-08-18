@@ -5,7 +5,7 @@ import socketio
 
 from app.core.config import settings
 from app.core.database import engine, Base
-from app.api import auth, teaching_models, lessons, export, series, system, course_tools, template_fill, documents, admin, semester_helper, textbooks, payments
+from app.api import auth, teaching_models, lessons, export, series, system, course_tools, template_fill, documents, admin, semester_helper, textbooks, payments, zhuke_materials
 
 
 @asynccontextmanager
@@ -85,6 +85,7 @@ app.include_router(admin.router, prefix="/api/v1")
 app.include_router(semester_helper.router, prefix="/api/v1")
 app.include_router(textbooks.router, prefix="/api/v1")
 app.include_router(payments.router, prefix="/api/v1")
+app.include_router(zhuke_materials.router, prefix="/api/v1")
 
 
 @app.get("/")

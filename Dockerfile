@@ -5,6 +5,10 @@
 # Requires Docker BuildKit (heredoc COPY <<'EOF'). Docker Desktop enables it by default;
 # Linux: DOCKER_BUILDKIT=1 docker compose build ...
 # Secrets: inject at runtime (Coolify / compose env_file), never COPY .env into the image
+# 导出付费：静态收款码 + SMTP 邮件通知管理员（无 V免签 / 无第三方支付服务）
+# 珠科材料助手：需 DEEPSEEK_API_KEY；模版在 backend/templates/zhuke_materials/
+# 运行期模型由 env 注入（默认见 .env.example）：qwen3.8-max / qwen3.7-plus /
+# kimi-k2.6 / doubao-seed-2-1-pro-260628 / deepseek-v4-pro / 4.0Ultra
 # ============================================
 
 # ---------- 阶段1: 构建前端 (Vite) ----------

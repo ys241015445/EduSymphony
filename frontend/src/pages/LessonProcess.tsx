@@ -30,6 +30,8 @@ import Card from '../components/ui/Card'
 import AgentCard from '../components/lesson/AgentCard'
 import SectionPanel, { Section } from '../components/lesson/SectionPanel'
 import VoteResult from '../components/lesson/VoteResult'
+import PetsDesktopLayer from '../components/lesson/pets/PetsDesktopLayer'
+import { usePetStage } from '../components/lesson/pets/usePetStage'
 import AnnotationEditor from '../components/lesson/AnnotationEditor'
 import { ArrowLeft, FileText, Loader2, CheckCircle2, Clock, RefreshCw, Download, ChevronDown, FileType, X, Eye, Printer, BookOpen, Wrench, Zap, Sparkles, AlertCircle } from 'lucide-react'
 import StyledPdfModal from '../components/lesson/StyledPdfModal'
@@ -121,6 +123,7 @@ export default function LessonProcess() {
 
   const [streamBuffers, setStreamBuffers] = useState<Record<string, StreamBuffer>>({})
   const [streamingContent, setStreamingContent] = useState<Record<number, { text: string; done: boolean }>>({})
+  const [highlightPetRole, setHighlightPetRole] = useState<string | null>(null)
 
   // Full document states
   const [activeVersion, setActiveVersion] = useState<'draft' | 'optimized' | 'materials' | 'analysis'>('draft')
@@ -806,6 +809,22 @@ export default function LessonProcess() {
     !fc.full_optimized &&
     (!fc.stages || Object.keys(fc.stages).length === 0)
 
+  const petSnapshot = usePetStage({
+    streamBuffers,
+    activeStageNum,
+    stageVote: stageVotes[activeStageNum] || null,
+    fullDraftStreaming,
+    fullOptimizedStreaming,
+    isQuickMode,
+  })
+
+  const focusAgentCard = useCallback((role: string) => {
+    setHighlightPetRole(role)
+    const el = document.querySelector(`[data-agent-role="${CSS.escape(role)}"]`) as HTMLElement | null
+    el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    window.setTimeout(() => setHighlightPetRole((cur) => (cur === role ? null : cur)), 2200)
+  }, [])
+
   return (
     <div className="h-screen bg-gray-50 flex flex-col overflow-hidden">
       {/* Top bar — fixed height, never scrolls */}
@@ -916,7 +935,10 @@ export default function LessonProcess() {
       )}
 
       {/* Main content: 2 columns — takes all remaining height */}
-      <div className="flex-1 flex min-h-0">
+      <div className="relative flex-1 flex min-h-0">
+        {!isQuickMode && (
+          <PetsDesktopLayer snapshot={petSnapshot} onSelectRole={focusAgentCard} />
+        )}
         {/* LEFT COLUMN: Lesson info + section nav + AI discussion (merged) */}
         <div className="w-[420px] flex-shrink-0 border-r border-gray-200 panel-scroll bg-white">
           <div className="p-4">
@@ -986,26 +1008,28 @@ export default function LessonProcess() {
                     )}
                     <div className="space-y-3">
                       {activeAnalysisStreams.length > 0 && activeAnalysisStreams.map((buf) => (
-                        <AgentCard
-                          key={`stream-${activeStageNum}-${buf.agentRole}`}
-                          role={buf.agentRole}
-                          streamingText={buf.text}
-                          isStreaming={!buf.done}
-                          provider={buf.provider}
-                        />
+                        <div key={`stream-${activeStageNum}-${buf.agentRole}`} data-agent-role={buf.agentRole} className={highlightPetRole === buf.agentRole ? 'ring-2 ring-brand-300 rounded-xl' : undefined}>
+                          <AgentCard
+                            role={buf.agentRole}
+                            streamingText={buf.text}
+                            isStreaming={!buf.done}
+                            provider={buf.provider}
+                          />
+                        </div>
                       ))}
 
                       {activeAnalysisStreams.length === 0 && sectionDiscussions.map((d) => (
-                        <AgentCard
-                          key={d.id}
-                          role={d.agent_role}
-                          opinion={d.opinion}
-                          isAccepted={d.is_accepted}
-                          votes={d.votes || null}
-                          timestamp={d.created_at ? new Date(d.created_at).toLocaleTimeString(useLanguageStore.getState().locale, { hour12: false }) : undefined}
-                          onRegenerate={() => handleRegenerateDiscussion(d.id)}
-                          isRegenerating={regeneratingDiscussions.has(d.id)}
-                        />
+                        <div key={d.id} data-agent-role={d.agent_role} className={highlightPetRole === d.agent_role ? 'ring-2 ring-brand-300 rounded-xl' : undefined}>
+                          <AgentCard
+                            role={d.agent_role}
+                            opinion={d.opinion}
+                            isAccepted={d.is_accepted}
+                            votes={d.votes || null}
+                            timestamp={d.created_at ? new Date(d.created_at).toLocaleTimeString(useLanguageStore.getState().locale, { hour12: false }) : undefined}
+                            onRegenerate={() => handleRegenerateDiscussion(d.id)}
+                            isRegenerating={regeneratingDiscussions.has(d.id)}
+                          />
+                        </div>
                       ))}
                     </div>
                   </div>

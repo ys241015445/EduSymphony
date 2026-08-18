@@ -51,7 +51,7 @@ export default function Auth() {
           </p>
         </div>
         <div className="text-white/40 text-sm">
-          &copy; {new Date().getFullYear()} EduSymphony
+          &copy; {new Date().getFullYear()} {t('nav.brand')}
         </div>
       </div>
 

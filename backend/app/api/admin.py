@@ -37,6 +37,7 @@ class UserAdminRow(BaseModel):
     can_export: bool = True
     # Off by default — only admin or explicitly enabled by admin.
     can_semester_helper: bool = False
+    can_zhuke_materials: bool = False
 
     # 导出付费闸门
     export_credits: int = 0
@@ -56,6 +57,7 @@ class UserAdminUpdate(BaseModel):
     can_next_lesson: Optional[bool] = None
     can_export: Optional[bool] = None
     can_semester_helper: Optional[bool] = None
+    can_zhuke_materials: Optional[bool] = None
     export_pay_exempt: Optional[bool] = None
     export_credits: Optional[int] = None
 
@@ -78,7 +80,10 @@ class UserAdminUpdate(BaseModel):
         return v
 
 
-_CAPABILITY_DEFAULTS = {f: (False if f == "can_semester_helper" else True) for f in CAPABILITY_FLAGS}
+_CAPABILITY_DEFAULTS = {
+    f: (False if f in ("can_semester_helper", "can_zhuke_materials") else True)
+    for f in CAPABILITY_FLAGS
+}
 
 
 def _row(u: User) -> UserAdminRow:

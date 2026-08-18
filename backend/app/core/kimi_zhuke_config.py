@@ -22,7 +22,7 @@ KIMI_K2_CONCURRENCY = _env_int("KIMI_K2_CONCURRENCY", 4, 1, 32)
 KIMI_K2_MODEL = (
     os.getenv("KIMI_K2_MODEL", "").strip()
     or os.getenv("KIMI_MODEL", "").strip()
-    or "kimi-k2-0905-preview"
+    or "kimi-k2.6"
 )
 KIMI_K2_TIMEOUT_SEC = _env_float("KIMI_K2_TIMEOUT_SEC", 120.0, 60.0, 600.0)
 KIMI_K2_RETRY_ATTEMPTS = _env_int("KIMI_K2_RETRY_ATTEMPTS", 2, 1, 5)

@@ -5,7 +5,7 @@ import { useT } from '../i18n/translations'
 import Header from '../components/layout/Header'
 import Button from '../components/ui/Button'
 import Card from '../components/ui/Card'
-import { Plus, FileText, Clock, CheckCircle2, AlertCircle, Loader2, Trash2, Zap, BookOpen, Wrench, GraduationCap, FileEdit, Library, Zap as ZapIcon, Hourglass, Files, LayoutGrid, Layers, X, CalendarRange } from 'lucide-react'
+import { Plus, FileText, Clock, CheckCircle2, AlertCircle, Loader2, Trash2, Zap, BookOpen, Wrench, GraduationCap, FileEdit, Library, Zap as ZapIcon, Hourglass, Files, LayoutGrid, Layers, X, CalendarRange, NotebookPen } from 'lucide-react'
 import { useJobsStore } from '../stores/jobsStore'
 import { useAuthStore } from '../stores/authStore'
 import { canUseCourseTools, parseAccessLevel, hasCapability } from '../lib/access'
@@ -219,6 +219,7 @@ export default function Dashboard() {
   const showSeries = hasCapability(user as any, 'can_series')
   const showUniversity = hasCapability(user as any, 'can_university')
   const showSemesterHelper = hasCapability(user as any, 'can_semester_helper')
+  const showZhukeMaterials = hasCapability(user as any, 'can_zhuke_materials')
   // 用原子 selector 单独订阅；store actions 不入 useEffect deps，避免触发循环
   const lessons       = useLessonStore((s) => s.lessons)
   const seriesList    = useLessonStore((s) => s.seriesList)
@@ -356,6 +357,14 @@ export default function Dashboard() {
                 </Button>
               </Link>
             )}
+            {showZhukeMaterials && (
+              <Link to={`/zhuke-materials${scopeQs}`} className={DASH_LINK}>
+                <Button variant="secondary" size="sm" className={`${DASH_BTN} !border-sky-300 !text-sky-700 !bg-sky-50 hover:!bg-sky-100`}>
+                  <NotebookPen className="w-4 h-4 shrink-0" />
+                  {t('dashboard.zhuke_materials')}
+                </Button>
+              </Link>
+            )}
             <Link to={`/lesson/new${scopeQs}`} className={DASH_LINK}>
               <Button size="sm" className={`${DASH_BTN} shadow-sm`}>
                 <Plus className="w-4 h-4 shrink-0" />
@@ -485,6 +494,14 @@ export default function Dashboard() {
                   <Button variant="secondary" size="sm" className={`${DASH_BTN} !border-amber-300 !text-amber-700 !bg-amber-50 hover:!bg-amber-100`}>
                     <CalendarRange className="w-4 h-4 shrink-0" />
                     {t('dashboard.semester_helper')}
+                  </Button>
+                </Link>
+              )}
+              {showZhukeMaterials && (
+                <Link to={`/zhuke-materials${scopeQs}`} className={DASH_LINK}>
+                  <Button variant="secondary" size="sm" className={`${DASH_BTN} !border-sky-300 !text-sky-700 !bg-sky-50 hover:!bg-sky-100`}>
+                    <NotebookPen className="w-4 h-4 shrink-0" />
+                    {t('dashboard.zhuke_materials')}
                   </Button>
                 </Link>
               )}

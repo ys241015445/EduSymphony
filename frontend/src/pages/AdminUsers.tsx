@@ -23,6 +23,7 @@ type AdminUserRow = {
   can_next_lesson?: boolean
   can_export?: boolean
   can_semester_helper?: boolean
+  can_zhuke_materials?: boolean
   export_credits?: number
   export_pay_exempt?: boolean
 }

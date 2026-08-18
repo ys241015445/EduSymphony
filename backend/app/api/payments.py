@@ -1,19 +1,17 @@
-"""导出付费闸门 API（V免签充值额度）。
+"""导出付费闸门 API（邮件认领 + 管理员额度）。
 
 流程：
-  1. 前端 POST /payments/create（选微信/支付宝）→ 建订单 + 调 V免签下单 → 返回二维码内容+应付金额。
-  2. 前端轮询 GET /payments/{id}/status。
-  3. 用户扫码付款 → V免签监控端上报 → V免签异步回调 GET /payments/vmq-notify → 验签→给额度→返回 success。
-  4. 纯前端 blob 下载在下载前 POST /payments/consume 扣 1 额度（管理员/白名单放行不扣）。
+  1. 前端展示静态收款码（ALIPAY_QR / WECHAT_QR）。
+  2. 用户扫码付款后点「我已支付」→ POST /payments/claim → 临时额度 + 邮件通知管理员。
+  3. 管理员核对后 POST /payments/{id}/confirm，或在用户管理直接改 export_credits。
+  4. 导出/下载前 POST /payments/consume 扣 1 额度（管理员/白名单不扣）。
 """
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Query
-from fastapi.responses import PlainTextResponse
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,22 +31,22 @@ def _is_exempt(user: User) -> bool:
     return user_access_level(user) == ACCESS_ADMIN or bool(getattr(user, "export_pay_exempt", False))
 
 
-class CreateOrderBody(BaseModel):
-    pay_type: int = 1  # 1=微信 2=支付宝
+class ClaimBody(BaseModel):
+    pay_type: int = 2  # 1=微信 2=支付宝
 
 
 @router.get("/config")
 async def payment_config(current_user: User = Depends(get_current_active_user)):
-    """前端读取：价格、每单额度、是否启用、当前用户额度与豁免状态。"""
-    from app.services import vmq_client
+    """前端读取：价格、额度、收款码、当前用户额度与豁免状态。"""
+    exempt = _is_exempt(current_user)
     return {
-        "enabled": vmq_client.is_configured(),
+        # 付费闸门对非豁免用户启用（静态码 + 邮件认领，无第三方自动确认）
+        "enabled": not exempt,
         "price": settings.EXPORT_PRICE,
         "credits_per_order": settings.EXPORT_CREDITS_PER_ORDER,
         "timeout_sec": settings.EXPORT_ORDER_TIMEOUT_SEC,
         "export_credits": int(getattr(current_user, "export_credits", 0) or 0),
-        "exempt": _is_exempt(current_user),
-        # 第二种方式：静态收款码 + 临时额度
+        "exempt": exempt,
         "alipay_qr": settings.ALIPAY_QR,
         "wechat_qr": settings.WECHAT_QR,
         "temp_credits": settings.EXPORT_TEMP_CREDITS,
@@ -57,7 +55,7 @@ async def payment_config(current_user: User = Depends(get_current_active_user)):
 
 @router.post("/claim")
 async def claim_paid(
-    body: CreateOrderBody,
+    body: ClaimBody,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -70,7 +68,6 @@ async def claim_paid(
     if body.pay_type not in (1, 2):
         raise HTTPException(400, "pay_type 只能为 1(微信) 或 2(支付宝)")
 
-    # 防刷：已有未确认订单则拒绝
     existing = (await db.execute(
         select(PaymentOrder).where(
             PaymentOrder.user_id == current_user.id,
@@ -87,13 +84,11 @@ async def claim_paid(
         status="pending_review",
     )
     db.add(order)
-    # 发放临时额度
     fresh = (await db.execute(select(User).where(User.id == current_user.id))).scalar_one_or_none()
     if fresh is not None:
         fresh.export_credits = int(getattr(fresh, "export_credits", 0) or 0) + temp
     await db.commit()
 
-    # 邮件通知（备注哪个用户充了）
     channel = "微信" if body.pay_type == 1 else "支付宝"
     subject = f"[导出充值] {current_user.username} 提交了 ¥{settings.EXPORT_PRICE} 充值"
     lines = [
@@ -108,7 +103,10 @@ async def claim_paid(
         f"时间：{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC",
     ]
     from app.services import email_service
-    await email_service.send_admin_notice(subject, "\n".join(lines))
+    try:
+        await email_service.send_admin_notice(subject, "\n".join(lines))
+    except Exception as e:
+        logger.warning(f"[payments] claim mail failed order={order.id}: {e}")
 
     fresh_credits = (await db.execute(select(User.export_credits).where(User.id == current_user.id))).scalar()
     return {"ok": True, "export_credits": int(fresh_credits or 0), "temp_credits": temp, "order_id": order.id}
@@ -120,64 +118,29 @@ async def confirm_order(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_admin),
 ):
-    """管理员确认到账（额度已在领取时发放；确认仅做标记，解除该用户防刷限制）。"""
+    """管理员确认到账（额度已在领取时发放；确认仅做标记，解除该用户防刷限制）。
+
+    若需补足至「每单正式额度」，可在确认时把差额加到用户 export_credits。
+    """
     order = (await db.execute(select(PaymentOrder).where(PaymentOrder.id == order_id))).scalar_one_or_none()
     if order is None:
         raise HTTPException(404, "订单不存在")
+    if order.status == "confirmed":
+        return {"ok": True, "status": order.status}
+
+    formal = int(settings.EXPORT_CREDITS_PER_ORDER or 1)
+    already = int(order.credits or 0)
+    top_up = max(0, formal - already)
+    if top_up > 0:
+        user = (await db.execute(select(User).where(User.id == order.user_id))).scalar_one_or_none()
+        if user is not None:
+            user.export_credits = int(getattr(user, "export_credits", 0) or 0) + top_up
+        order.credits = already + top_up
+
     order.status = "confirmed"
     order.paid_at = datetime.utcnow()
     await db.commit()
-    return {"ok": True, "status": order.status}
-
-
-@router.post("/create")
-async def create_payment(
-    body: CreateOrderBody,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-):
-    from app.services import vmq_client
-    if _is_exempt(current_user):
-        # 豁免用户无需付款
-        raise HTTPException(400, "当前账号无需付费")
-    if not vmq_client.is_configured():
-        raise HTTPException(503, "支付通道未配置，请联系管理员")
-    if body.pay_type not in (1, 2):
-        raise HTTPException(400, "pay_type 只能为 1(微信) 或 2(支付宝)")
-
-    pay_id = uuid.uuid4().hex
-    order_id = str(uuid.uuid4())
-    price = float(settings.EXPORT_PRICE)
-    credits = int(settings.EXPORT_CREDITS_PER_ORDER)
-    notify_url = settings.VMQ_NOTIFY_BASE.rstrip("/") + "/api/v1/payments/vmq-notify" if settings.VMQ_NOTIFY_BASE else ""
-
-    try:
-        res = await vmq_client.create_order(
-            pay_id=pay_id, price=price, type_=body.pay_type,
-            notify_url=notify_url, return_url="",
-        )
-    except Exception as e:
-        logger.warning(f"[payments] create_order failed user={current_user.id}: {e}")
-        raise HTTPException(502, f"下单失败：{e}")
-
-    order = PaymentOrder(
-        id=order_id, user_id=current_user.id, pay_id=pay_id,
-        vmq_order_id=res.get("order_id") or None, pay_type=body.pay_type,
-        price=price, really_price=res.get("really_price"), credits=credits,
-        status="pending",
-    )
-    db.add(order)
-    await db.commit()
-
-    return {
-        "order_id": order_id,
-        "pay_type": body.pay_type,
-        "price": price,
-        "really_price": res.get("really_price") or price,
-        "pay_url": res.get("pay_url") or "",
-        "credits": credits,
-        "timeout_sec": settings.EXPORT_ORDER_TIMEOUT_SEC,
-    }
+    return {"ok": True, "status": order.status, "top_up": top_up}
 
 
 @router.get("/{order_id}/status")
@@ -190,51 +153,8 @@ async def order_status(
     order = res.scalar_one_or_none()
     if order is None or (order.user_id != current_user.id and user_access_level(current_user) != ACCESS_ADMIN):
         raise HTTPException(404, "订单不存在")
-
-    # 兜底：若仍 pending，主动向 V免签查一次
-    if order.status == "pending" and order.vmq_order_id:
-        from app.services import vmq_client
-        paid = await vmq_client.check_order(order.vmq_order_id)
-        if paid:
-            await _mark_paid_and_credit(order.id)
-            await db.refresh(order)
-
-    # 返回最新用户额度
     fresh_credits = (await db.execute(select(User.export_credits).where(User.id == current_user.id))).scalar()
     return {"status": order.status, "export_credits": int(fresh_credits or 0)}
-
-
-async def _mark_paid_and_credit(order_id: str) -> bool:
-    """幂等地把订单置 paid 并给用户加额度。返回是否本次实际发放。"""
-    async with async_session_maker() as s:
-        order = (await s.execute(select(PaymentOrder).where(PaymentOrder.id == order_id))).scalar_one_or_none()
-        if order is None or order.status == "paid":
-            return False
-        order.status = "paid"
-        order.paid_at = datetime.utcnow()
-        user = (await s.execute(select(User).where(User.id == order.user_id))).scalar_one_or_none()
-        if user is not None:
-            user.export_credits = int(getattr(user, "export_credits", 0) or 0) + int(order.credits or 0)
-        await s.commit()
-        return True
-
-
-@router.get("/vmq-notify")
-async def vmq_notify(request: Request):
-    """V免签异步回调：验签→标记 paid→发放额度→返回纯文本 success。"""
-    from app.services import vmq_client
-    params = dict(request.query_params)
-    if not vmq_client.verify_notify(params):
-        logger.warning(f"[payments] vmq-notify bad sign: {params}")
-        return PlainTextResponse("fail")
-    pay_id = str(params.get("payId") or "")
-    async with async_session_maker() as s:
-        order = (await s.execute(select(PaymentOrder).where(PaymentOrder.pay_id == pay_id))).scalar_one_or_none()
-    if order is None:
-        logger.warning(f"[payments] vmq-notify unknown payId={pay_id}")
-        return PlainTextResponse("fail")
-    await _mark_paid_and_credit(order.id)
-    return PlainTextResponse("success")
 
 
 @router.post("/consume")

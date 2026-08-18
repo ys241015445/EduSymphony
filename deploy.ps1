@@ -1,6 +1,6 @@
 # =============================================================================
 # One-click full-stack deploy (Windows local)
-#   backend + frontend + vmq (V-mian-qian) + vmq-db all via docker
+#   backend + frontend via docker compose
 #   Usage:  powershell -ExecutionPolicy Bypass -File .\deploy.ps1
 #   (ASCII-only on purpose: Windows PowerShell mis-decodes non-ASCII .ps1)
 # =============================================================================
@@ -37,7 +37,7 @@ if (-not (Test-Docker)) {
     }
 }
 
-Write-Host "[deploy] Building and starting full stack (backend + frontend + vmq + vmq-db) ..." -ForegroundColor Cyan
+Write-Host "[deploy] Building and starting full stack (backend + frontend) ..." -ForegroundColor Cyan
 docker compose up -d --build
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[deploy] docker compose failed" -ForegroundColor Red
@@ -50,7 +50,7 @@ docker compose ps
 
 Write-Host ""
 Write-Host "================ DONE ================" -ForegroundColor Green
-Write-Host " App frontend :  http://localhost:3002"
-Write-Host " V-mian-qian  :  http://localhost:8080   (login: lzf / lzf122406!)"
-Write-Host " Phone monitor app -> http://<your-LAN-IP>:8080   key: see setting.key in vmq/vmq.sql"
+Write-Host " EduSymphony  :  http://localhost:3002"
+Write-Host " Payment gate :  static QR + claim email + admin credits"
+Write-Host " Zhuke mats   :  set DEEPSEEK_API_KEY; run supabase_zhuke_materials_migration.sql"
 Write-Host "=====================================" -ForegroundColor Green

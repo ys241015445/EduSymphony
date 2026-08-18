@@ -49,7 +49,7 @@ export default function Header() {
       <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
         <Link to="/" className="flex items-center gap-2.5 text-gray-900 hover:text-brand-600 transition-colors">
           <BookOpen className="w-6 h-6 text-brand-600" />
-          <span className="text-lg font-semibold tracking-tight">EduSymphony</span>
+          <span className="text-lg font-semibold tracking-tight">{t('nav.brand')}</span>
         </Link>
 
         <nav className="flex items-center gap-3">

@@ -8,6 +8,7 @@ export type CapabilityFlag =
   | 'can_next_lesson'
   | 'can_export'
   | 'can_semester_helper'
+  | 'can_zhuke_materials'
 
 export const CAPABILITY_FLAGS: CapabilityFlag[] = [
   'can_course_tools',
@@ -17,6 +18,7 @@ export const CAPABILITY_FLAGS: CapabilityFlag[] = [
   'can_next_lesson',
   'can_export',
   'can_semester_helper',
+  'can_zhuke_materials',
 ]
 
 /** Per-flag default for users where the column is missing/null (legacy rows). */
@@ -28,6 +30,7 @@ export const CAPABILITY_DEFAULTS: Record<CapabilityFlag, boolean> = {
   can_next_lesson: true,
   can_export: true,
   can_semester_helper: false,
+  can_zhuke_materials: false,
 }
 
 export function parseAccessLevel(v: string | undefined | null): AccessLevel {
@@ -56,6 +59,7 @@ type UserLike = {
   can_next_lesson?: boolean | null
   can_export?: boolean | null
   can_semester_helper?: boolean | null
+  can_zhuke_materials?: boolean | null
 } | null | undefined
 
 export function hasCapability(user: UserLike, flag: CapabilityFlag): boolean {

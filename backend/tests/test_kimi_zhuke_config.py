@@ -10,7 +10,7 @@ class TestKimiZhukeConfig(unittest.TestCase):
         from app.core import kimi_zhuke_config as cfg
 
         self.assertEqual(cfg.KIMI_K2_CONCURRENCY, 4)
-        self.assertEqual(cfg.KIMI_K2_MODEL, "kimi-k2-0905-preview")
+        self.assertEqual(cfg.KIMI_K2_MODEL, "kimi-k2.6")
         self.assertEqual(cfg.KIMI_K2_TIMEOUT_SEC, 120.0)
         self.assertEqual(cfg.KIMI_K2_RETRY_BACKOFF, (15, 45))
 

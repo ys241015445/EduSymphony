@@ -10,7 +10,7 @@ export default function Footer() {
           <div>
             <div className="flex items-center gap-2 mb-3">
               <BookOpen className="w-5 h-5 text-brand-600" />
-              <span className="font-semibold text-gray-900">EduSymphony</span>
+              <span className="font-semibold text-gray-900">{t('footer.brand')}</span>
             </div>
             <p className="text-sm text-gray-500 max-w-xs">
               {t('footer.desc')}

@@ -196,7 +196,7 @@ class AIService:
         return response.choices[0].message.content
 
     # ──────────────────────────────────────────────────────────────
-    # 视觉 / 多模态（立体几何图片入口用）— 默认 qwen-vl-max
+    # 视觉 / 多模态（立体几何图片入口用）— 默认 qwen3.7-plus
     # ──────────────────────────────────────────────────────────────
 
     async def generate_vision(
@@ -212,7 +212,7 @@ class AIService:
     ) -> str:
         """多模态调用：prompt + 一张或多张图片（`images` 为 data URL 或 http URL）。
 
-        默认走 qwen 的 DashScope 兼容通道 + `qwen-vl-max`。未配置 qwen 时回退到
+        默认走 qwen 的 DashScope 兼容通道 + `qwen3.7-plus`。未配置 qwen 时回退到
         provider_order 里第一个可用 provider（仍用其视觉能力，可能失败由调用方兜底）。
         """
         provider = self.providers.get(provider_name) or (

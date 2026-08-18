@@ -16,6 +16,7 @@
 # Root Dockerfile uses heredoc COPY — requires BuildKit (DOCKER_BUILDKIT=1 if needed).
 #
 # Secrets: repo-root `.env` from `.env.example`; do not commit credentials.
+# 导出付费：静态收款码 + 邮件通知管理员 + 管理后台改额度（无第三方支付服务）。
 
 services:
   app:
@@ -27,18 +28,14 @@ services:
     env_file:
       - .env
     environment:
-      # ── 视觉/多模态模型（立体几何「上传题目图片解题」入口）──
-      # 走 DashScope 兼容通道，复用 QWEN_API_KEY / QWEN_BASE_URL；.env 未配则用默认
-      QWEN_VL_MODEL:             ${QWEN_VL_MODEL:-qwen-vl-max}
-      # 文生图模型（英语卡片/知识漫画配图，走豆包方舟）。留空=关闭配图（纯文字）
+      # ─── 主力模型默认（与 .env.example / config.py 对齐；可用 .env 覆盖） ───
+      QWEN_MODEL:                ${QWEN_MODEL:-qwen3.8-max}
+      QWEN_VL_MODEL:             ${QWEN_VL_MODEL:-qwen3.7-plus}
+      KIMI_MODEL:                ${KIMI_MODEL:-kimi-k2.6}
+      KIMI_K2_MODEL:             ${KIMI_K2_MODEL:-kimi-k2.6}
+      DOUBAO_MODEL:              ${DOUBAO_MODEL:-doubao-seed-2-1-pro-260628}
       DOUBAO_IMAGE_MODEL:        ${DOUBAO_IMAGE_MODEL:-}
-      # V免签（容器内用服务名访问；回调走容器内 app:80，由 nginx 反代到 backend）
-      VMQ_BASE_URL:              http://vmq:80
-      VMQ_NOTIFY_BASE:           ${VMQ_NOTIFY_BASE:-http://app:80}
-      # ── ⚠️ DEPRECATED：方舟 PPT 智能体 / Coze Bot 已从 _do_ppt 移除 ──
-      # PPT 现在走「本地两阶段豆包深度生成 + python-pptx 渲染」，
-      # 只依赖 DOUBAO_API_KEY + DOUBAO_MODEL，下面这几行不会被代码读取，
-      # 保留仅为兼容老 .env，整段删除也完全没问题。
+      SPARK_MODEL:               ${SPARK_MODEL:-4.0Ultra}
       DOUBAO_PPT_BOT_ID:         ${DOUBAO_PPT_BOT_ID:-}
       DOUBAO_PPT_BOT_TIMEOUT:    ${DOUBAO_PPT_BOT_TIMEOUT:-180}
       COZE_API_KEY:              ${COZE_API_KEY:-}
@@ -46,7 +43,6 @@ services:
       COZE_BASE_URL:             ${COZE_BASE_URL:-https://api.coze.cn}
       COZE_PPT_TIMEOUT:          ${COZE_PPT_TIMEOUT:-300}
       COZE_POLL_INTERVAL:        ${COZE_POLL_INTERVAL:-2.0}
-      # ── Postgres-backed 持久化队列 ──
       MAX_CONCURRENT_TASKS:      ${MAX_CONCURRENT_TASKS:-6}
       MAX_PER_USER_TASKS:        ${MAX_PER_USER_TASKS:-4}
       TASK_TIMEOUT_SEC:          ${TASK_TIMEOUT_SEC:-1200}
@@ -56,15 +52,27 @@ services:
       QUEUE_POLL_INTERVAL_MS:    ${QUEUE_POLL_INTERVAL_MS:-800}
       QUEUE_SWEEP_INTERVAL_SEC:  ${QUEUE_SWEEP_INTERVAL_SEC:-30}
       QUEUE_GC_DAYS:             ${QUEUE_GC_DAYS:-3}
-      # 生产默认 3 天 GC（控制 queue_jobs 表体积）；本地 compose 默认 7
+      # ─── 导出付费闸门（扫码 + 邮件；无第三方支付） ───
+      EXPORT_PRICE:              ${EXPORT_PRICE:-5}
+      EXPORT_CREDITS_PER_ORDER:  ${EXPORT_CREDITS_PER_ORDER:-1}
       EXPORT_ORDER_TIMEOUT_SEC:  ${EXPORT_ORDER_TIMEOUT_SEC:-300}
-      # ── 连接池与 6 worker 配套（显式覆盖 database.py 自动计算）──
+      EXPORT_TEMP_CREDITS:       ${EXPORT_TEMP_CREDITS:-1}
+      ADMIN_PAYMENT_EMAIL:       ${ADMIN_PAYMENT_EMAIL:-}
+      ALIPAY_QR:                 ${ALIPAY_QR:-}
+      WECHAT_QR:                 ${WECHAT_QR:-}
+      SMTP_HOST:                 ${SMTP_HOST:-smtp.qq.com}
+      SMTP_PORT:                 ${SMTP_PORT:-465}
+      SMTP_USER:                 ${SMTP_USER:-}
+      SMTP_PASS:                 ${SMTP_PASS:-}
+      # ─── 珠科材料助手（DeepSeek） ───
+      DEEPSEEK_API_KEY:          ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL:            ${DEEPSEEK_MODEL:-deepseek-v4-pro}
+      ZHUKE_MATERIALS_DEEPSEEK_MODEL: ${ZHUKE_MATERIALS_DEEPSEEK_MODEL:-deepseek-v4-pro}
       DB_POOL_SIZE:              ${DB_POOL_SIZE:-16}
       DB_MAX_OVERFLOW:           ${DB_MAX_OVERFLOW:-6}
       DB_STATEMENT_TIMEOUT_MS:   ${DB_STATEMENT_TIMEOUT_MS:-120000}
       DB_COMMAND_TIMEOUT_SEC:    ${DB_COMMAND_TIMEOUT_SEC:-180}
     volumes:
-      # 仅持久化生成的文件（docx/pptx），数据库由 Supabase 托管
       - app_data:/app/backend/database
     restart: unless-stopped
     deploy:
@@ -79,43 +87,5 @@ services:
       start_period: 60s
       retries: 3
 
-  # V免签数据库（独立 MySQL，与 Supabase 隔离）
-  vmq-db:
-    image: mysql:5.7
-    environment:
-      MYSQL_ROOT_PASSWORD: ${VMQ_DB_ROOT_PASS:-vmqroot123}
-      MYSQL_DATABASE: vmq
-      MYSQL_USER: vmq
-      MYSQL_PASSWORD: ${VMQ_DB_PASS:-vmqpass123}
-    volumes:
-      - vmq_db_data:/var/lib/mysql
-      - ./vmq/vmq.sql:/docker-entrypoint-initdb.d/vmq.sql:ro
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${VMQ_DB_ROOT_PASS:-vmqroot123}"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-      start_period: 30s
-    restart: unless-stopped
-
-  # V免签（xsidc/Vmqphp）。后台账号 lzf/lzf122406!（已预置），配好两码+通讯密钥。
-  # Coolify 给本服务配一个域名（如 pay.example.com）；手机监控端指向该域名。
-  # 后端 .env：VMQ_BASE_URL=http://vmq:80、VMQ_KEY=<同 vmq.sql key>、VMQ_NOTIFY_BASE=<后端公网域名>
-  vmq:
-    build: ./vmq
-    depends_on:
-      vmq-db:
-        condition: service_healthy
-    expose:
-      - "80"
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost/"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 40s
-    restart: unless-stopped
-
 volumes:
   app_data:
-  vmq_db_data:

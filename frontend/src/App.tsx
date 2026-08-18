@@ -20,6 +20,7 @@ import DocumentEditor from './pages/DocumentEditor'
 import SemesterHelper from './pages/SemesterHelper'
 import ZhukeLessonPlan from './pages/ZhukeLessonPlan'
 import ZhukeHistory from './pages/ZhukeHistory'
+import ZhukeMaterials from './pages/ZhukeMaterials'
 import { parseAccessLevel, isLimited, isAdmin, hasCapability, type CapabilityFlag } from './lib/access'
 import AdminUsers from './pages/AdminUsers'
 import AdminUserStorage from './pages/AdminUserStorage'
@@ -199,6 +200,16 @@ export default function App() {
         element={
           <ProtectedRoute>
             <ZhukeHistory />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/zhuke-materials"
+        element={
+          <ProtectedRoute>
+            <LimitedRoute>
+              <ZhukeMaterials />
+            </LimitedRoute>
           </ProtectedRoute>
         }
       />

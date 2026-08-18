@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { User, ChevronDown, ChevronUp, RefreshCw, ThumbsUp, ThumbsDown } from 'lucide-react'
+import { ChevronDown, ChevronUp, RefreshCw, ThumbsUp, ThumbsDown } from 'lucide-react'
 import clsx from 'clsx'
 import { useT } from '../../i18n/translations'
 import StreamingText from './StreamingText'
+import PetAvatar from './pets/PetAvatar'
 
 interface VoteDetail {
   voter: string
@@ -111,8 +112,8 @@ export default function AgentCard({
               className="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500"
             />
           )}
-          <div className={clsx('w-7 h-7 rounded-full flex items-center justify-center', colorClass.split(' ')[0])}>
-            <User className={clsx('w-3.5 h-3.5', colorClass.split(' ')[1])} />
+          <div className={clsx('w-7 h-7 rounded-full flex items-center justify-center overflow-hidden', colorClass.split(' ')[0])}>
+            <PetAvatar role={role} streaming={!!isStreaming} size={26} />
           </div>
           <span className={clsx(
             'text-sm font-medium',

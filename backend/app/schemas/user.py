@@ -26,6 +26,8 @@ class UserResponse(BaseModel):
     can_export: bool = True
     # Semester Material Assistant is OFF by default; admins bypass on the backend.
     can_semester_helper: bool = False
+    # 珠科材料助手（工作台）OFF by default
+    can_zhuke_materials: bool = False
 
     # 导出付费闸门：剩余导出额度 + 免付费白名单
     export_credits: int = 0
@@ -50,7 +52,7 @@ class UserResponse(BaseModel):
             return True
         return bool(v)
 
-    @field_validator("can_semester_helper", "export_pay_exempt", mode="before")
+    @field_validator("can_semester_helper", "can_zhuke_materials", "export_pay_exempt", mode="before")
     @classmethod
     def _coerce_semester_helper(cls, v):
         # OFF by default — legacy rows missing the column should be treated as False.

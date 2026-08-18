@@ -2,7 +2,7 @@
 # =============================================================================
 # 一键全栈部署（公网 Linux / VPS）
 #   用法：  bash deploy.sh
-#   默认用 docker-compose.coolify.yml（单容器 app + vmq + vmq-db）。
+#   默认用 docker-compose.coolify.yml（单容器 app = Nginx + backend）。
 #   Coolify 用户无需本脚本：推代码后在 Coolify 面板 redeploy 即可。
 # =============================================================================
 set -euo pipefail
@@ -25,8 +25,9 @@ docker compose -f "$COMPOSE_FILE" ps
 cat <<'EOF'
 
 ================ 部署完成 ================
- 应用     :  给 app 服务配置的域名（Coolify/反代）
- V免签后台:  给 vmq 服务配置的域名   (账号 lzf / lzf122406!)
- 提醒：后端 .env 设 VMQ_NOTIFY_BASE=<后端公网域名>；手机监控端填 vmq 公网域名 + key
+ EduSymphony 应用 :  给 app 服务配置的域名（Coolify/反代）
+ 付费闸门         :  扫码 +「我已支付」→ 邮件通知管理员确认额度
+ 提醒：配置 ALIPAY_QR / WECHAT_QR / SMTP_* / ADMIN_PAYMENT_EMAIL
+ 珠科材料助手     :  需 DEEPSEEK_API_KEY + 执行 supabase_zhuke_materials_migration.sql
 =========================================
 EOF

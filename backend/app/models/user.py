@@ -20,6 +20,7 @@ CAPABILITY_FLAGS = (
     "can_next_lesson",
     "can_export",
     "can_semester_helper",
+    "can_zhuke_materials",
 )
 
 
@@ -42,9 +43,11 @@ class User(Base):
     can_export        = Column(Boolean, nullable=False, default=True, server_default=text("true"))
     # Off by default; only admins (bypass) and users explicitly enabled by an admin can use it.
     can_semester_helper = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    # 珠科材料助手（工作台）：大纲+日历+教案；默认关闭
+    can_zhuke_materials = Column(Boolean, nullable=False, default=False, server_default=text("false"))
 
-    # 导出/下载付费闸门（V免签充值额度）：
-    #   export_credits    —— 剩余"导出额度"，付款成功 +N，每次下载扣 1
+    # 导出/下载付费闸门：
+    #   export_credits    —— 剩余"导出额度"，确认到账 +N，每次下载扣 1
     #   export_pay_exempt —— 管理员设置的免付费白名单（管理员本身 access_level=admin 恒免）
     export_credits    = Column(Integer, nullable=False, default=0, server_default=text("0"))
     export_pay_exempt = Column(Boolean, nullable=False, default=False, server_default=text("false"))

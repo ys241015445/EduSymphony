@@ -1,7 +1,10 @@
 -- ============================================================
 -- EduSymphony — Supabase (PostgreSQL) 完整建表脚本
--- 生成时间：2026-04-08
--- 说明：按依赖顺序建表，先建无外键的表，再建有外键的表
+-- 含：全部 can_*（含 can_zhuke_materials）、zhuke_material_projects、
+--     导出付费 payment_orders / export_credits 等
+-- 说明：按依赖顺序建表；新建库直接执行本文件。
+--       已有库增量请另跑 supabase_*_migration.sql（尤其
+--       supabase_zhuke_materials_migration.sql）
 -- ============================================================
 
 -- 启用 uuid 扩展（Supabase 默认已启用，保险起见加上）
@@ -18,7 +21,16 @@ CREATE TABLE IF NOT EXISTS users (
     role        VARCHAR(20)  NOT NULL DEFAULT 'free',       -- free / personal / school
     quota_remaining INTEGER  NOT NULL DEFAULT 100,
     access_level VARCHAR(20)  NOT NULL DEFAULT 'full',  -- full | limited | admin
-    -- 导出付费闸门（V免签充值额度）：剩余导出额度 + 免付费白名单
+    -- 功能开关（多数默认 TRUE；学期材料 / 珠科材料默认 FALSE）
+    can_course_tools    BOOLEAN NOT NULL DEFAULT true,
+    can_template_fill   BOOLEAN NOT NULL DEFAULT true,
+    can_university      BOOLEAN NOT NULL DEFAULT true,
+    can_series          BOOLEAN NOT NULL DEFAULT true,
+    can_next_lesson     BOOLEAN NOT NULL DEFAULT true,
+    can_export          BOOLEAN NOT NULL DEFAULT true,
+    can_semester_helper BOOLEAN NOT NULL DEFAULT false,
+    can_zhuke_materials BOOLEAN NOT NULL DEFAULT false,
+    -- 导出付费闸门：剩余导出额度 + 免付费白名单
     export_credits    INTEGER NOT NULL DEFAULT 0,
     export_pay_exempt BOOLEAN NOT NULL DEFAULT false,
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
@@ -32,12 +44,12 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE INDEX IF NOT EXISTS idx_users_username ON users (username);
 CREATE INDEX IF NOT EXISTS idx_users_email    ON users (email);
 
--- 导出付费充值订单（V免签）
+-- 导出付费充值订单（扫码 claim + 管理员确认）
 CREATE TABLE IF NOT EXISTS payment_orders (
     id            VARCHAR(36)  PRIMARY KEY,
     user_id       VARCHAR(36)  NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     pay_id        VARCHAR(64)  NOT NULL UNIQUE,
-    vmq_order_id  VARCHAR(64),
+    vmq_order_id  VARCHAR(64),                           -- 历史兼容列（可空）
     pay_type      INTEGER      NOT NULL DEFAULT 1,        -- 1=微信 2=支付宝
     price         DOUBLE PRECISION NOT NULL DEFAULT 5.0,
     really_price  DOUBLE PRECISION,
@@ -48,6 +60,33 @@ CREATE TABLE IF NOT EXISTS payment_orders (
 );
 CREATE INDEX IF NOT EXISTS idx_payment_orders_user   ON payment_orders (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_status ON payment_orders (status);
+
+-- 珠科材料助手项目（大纲 + 日历 + 教案流水线）
+CREATE TABLE IF NOT EXISTS zhuke_material_projects (
+    id                    VARCHAR(36) PRIMARY KEY,
+    user_id               VARCHAR(36) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    course_name           VARCHAR(200) NOT NULL DEFAULT '',
+    mode                  VARCHAR(8) NOT NULL DEFAULT 'C',
+    status                VARCHAR(32) NOT NULL DEFAULT 'created',
+    error                 TEXT,
+    context_json          TEXT,
+    syllabus_json         TEXT,
+    weeks_json            TEXT,
+    lessons_json          TEXT,
+    schedule_json         TEXT,
+    syllabus_path         VARCHAR(512),
+    calendar_theory_path  VARCHAR(512),
+    calendar_lab_path     VARCHAR(512),
+    lessons_path          VARCHAR(512),
+    material_html_path    VARCHAR(512),
+    ppt_path              VARCHAR(512),
+    material_json         TEXT,
+    ppt_json              TEXT,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_zhuke_mat_user ON zhuke_material_projects (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_zhuke_mat_status ON zhuke_material_projects (status);
 
 -- ============================================================
 -- 2. teaching_models — 教学模型/理论表

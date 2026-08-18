@@ -9,14 +9,16 @@
 - **快速生成模式**：输入主题即可直接生成初步教案，跳过多轮讨论，适合快速使用场景
 - **流式实时生成**：初步教案、教研讨论、专家投票、优化教案全程流式传输，Socket.IO 推送实时更新
 - **教学材料生成**：基于教案内容由**豆包两阶段**生成交互式 HTML 课程演示页——Stage A 抽取 ≥6 个知识点 JSON，Stage B 由 Python 模板壳渲染（全屏/主题/导航/折叠/思考题/进度等交互 JS 由模板保证可用）；数学立体几何/化学反应仍优先走确定性 skill 路径；失败时 fallback 为豆包单轮 HTML（`material_*_engine` 字段标注通道）
+- **专家桌面宠物舞台**：教案过程页左栏「教研宠物台」——五位专家（猫头鹰/狐狸/兔子/海豚/小猫）围坐讨论，跟随 `stream_*` / 投票事件切换发言、举手、欢呼；默认 SVG，可选 Seedream 精灵（`frontend/public/pets/`，用 `backend/scripts/gen_pet_sprites.py` 离线生成）
 - **当地风格排版 PDF**：基于范本格式由 AI 生成排版精美的教案 HTML，支持后台运行
 - **多 AI 模型支持**：Qwen（通义千问）、Kimi（月之暗面）、Doubao（豆包）、DeepSeek、Spark（讯飞星火）五家模型分配给五位专家
 - **多地区适配**：支持澳门/香港繁体中文教案生成（含教青局基本学力要求等本地化结构）
 - **国际化 (i18n)**：前端支持简体中文、繁体中文、英文切换，自动根据地区切换字体与语言
 - **多用户隔离**：JWT 认证，每个用户只能看到和操作自己的教案，Socket.IO 按 lesson room 隔离推送
 - **RBAC**：`users.access_level` 区分管理员与普通/受限用户；管理员在 Dashboard 可查看队列任务与用户维度信息；受限用户仅保留必要入口。部署需执行 `supabase_user_access_level_migration.sql`（见下方 SQL 顺序）；**可选**在 7 步完成后追加 `supabase_safe_run.sql` 做保守加固（不自动设管理员账号）。**勿在 README、截图或 Git 中粘贴生产账号、密码或完整连接串。**
-- **细粒度功能开关**：每用户 7 个 `can_*` 布尔列（`can_course_tools` / `can_template_fill` / `can_university` / `can_series` / `can_next_lesson` / `can_export` 默认 TRUE；`can_semester_helper` 默认 FALSE）；管理员页可逐项勾选/取消，后端 `require_capability(flag)` 守卫 + 前端 `CapabilityRoute` 同步校验；admin（`lzf` / `ys`）始终自动绕过所有 `can_*` 检查
-- **学期材料小助手 + 珠科教案助手**：`/semester-helper` 学期材料小助手模块（hub），子模块 `/semester-helper/zhuke` 珠科教案助手 —— 上传珠科教学日历 xlsx/docx → 后端 `openpyxl` / `python-docx` 解析出封面信息 + 每节课主题 → Kimi K2.6（`KIMI_K2_MODEL`）逐节生成教学目标/重难点/教学过程 → 按 `backend/templates/zhuke_lesson_template.docx` 模板组装 → docx / pdf 下载，全程记入 `export_records`。**异步队列 + 实时预览**：POST `/zhuke/generate` 立即入队返 `result_id`；每节课独立入队为 `zhuke_lesson_single`（`target_id={result_id}::{idx}`），多 worker 并行 claim，单用户珠科并发上限 `KIMI_K2_CONCURRENCY=4`（可在 `.env` 调高）；每课用独立 `LessonSubAgent` 调 Kimi，调 Kimi 前 emit `zhuke_lesson_started` 心跳，Kimi 返回后立刻 emit `zhuke_lesson_done` 带完整 9-section JSON 并增量写 `{rid}.lessons.json`，前端折叠卡片实时冒出；全部课次完成后 `maybe_finalize_zhuke_batch` 按课序合并 docx 并 emit `zhuke_complete`。**专属入口**：`/semester-helper/zhuke/history` 「我的珠科教案」独立全量历史页（docx/pdf 双下载 + 删除）；`/documents?tab=exports` 通用文档库识别 `zhuke_generation` 中文标签 + 下拉过滤 + 珠科行专属 docx/pdf 双下载。**docx 排版**：cover 6 字段（学院/专业/班级/授课类别/课程名称/主讲教师）填值时自动带下划线 + 字体跟模板 label 一致；「授课题目（项目或模块）」cell 用教学日历里的原文（不截断）；每周首节强制新页 + 完整 heading，同周后续表格紧贴。**docx → pdf 真格式转换**：调系统的 LibreOffice headless (`soffice --headless --convert-to pdf`) 保留所有表格 / 字体 / 下划线 / 分页（需在服务器安装 `libreoffice-writer`，详见部署章节）；缺失时返 503 + 中文 actionable 提示。**自愈机制**：worker 被 cancel/reload 杀掉时 `except asyncio.CancelledError` 路径标 DB row failed；backend startup 跑 `_zhuke_resurrect_orphans()` 把 `updated_at > 15min` 的 running/queued 孤儿行转 failed；admin POST `/zhuke/admin/cleanup-missing` 一次性扫表把 docx 丢失的行标 failed + 清残留 sidecar；status='done' 但磁盘 docx 已被清的行在 UI 显示「文件已丢失」+ 重新生成按钮（不再点了才 404）
+- **细粒度功能开关**：每用户 8 个 `can_*` 布尔列（`can_course_tools` / `can_template_fill` / `can_university` / `can_series` / `can_next_lesson` / `can_export` 默认 TRUE；`can_semester_helper` / `can_zhuke_materials` 默认 FALSE）；管理员页可逐项勾选/取消，后端 `require_capability(flag)` 守卫 + 前端 `CapabilityRoute` 同步校验；admin（`lzf` / `ys`）始终自动绕过所有 `can_*` 检查
+- **学期材料小助手 + 珠科教案助手**：`/semester-helper` 学期材料小助手模块（hub），子模块 `/semester-helper/zhuke` 珠科教案助手 —— 上传珠科教学日历 xlsx/docx → Kimi 逐节生成教案 → 组 docx/pdf（详见该模块实现与 `supabase_semester_helper_capability.sql`）
+- **珠科材料助手（工作台独立入口）**：`/zhuke-materials` —— 与珠科教案助手分离；按 skill 流水线生成**教学大纲 + 教学日历 + 教案**，并可一键由 DeepSeek 再生成**交互式教学材料 HTML + PPTX**（服务端 `python-docx` / `openpyxl` / `python-pptx`）。需 `can_zhuke_materials`（默认关）与 `DEEPSEEK_API_KEY`；模版在 `backend/templates/zhuke_materials/`；执行 `supabase_zhuke_materials_migration.sql`，已有项目表再执行 `supabase_zhuke_materials_assets_migration.sql`
 - **软删除全表覆盖**：`lesson_plans` / `lesson_series` / `document_versions` / `export_records` 四张表全部走 `deleted_at` 软删除；普通用户列表默认隐藏；管理员通过 `?include_deleted=true` 仍可查看与恢复
 - **完整导出留痕**：所有下载/导出按钮点击（教案 JSON/TXT/MD/DOCX/PDF、教学材料、排版 PDF、模板填写、课程工具产物、珠科教案 docx/pdf、客户端直连下载）都记入 `export_records`；管理员可在用户详情页查看、下载或删除任意用户的导出历史
 - **云端数据库**：Supabase PostgreSQL 托管存储 + 本地文件存储，asyncpg 驱动 + 连接池自适应（直连 / Transaction Pooler 自动切换）
@@ -24,7 +26,7 @@
 - **Postgres 持久化任务队列**：队列落盘至 `queue_jobs` 表（`SELECT FOR UPDATE SKIP LOCKED`），支持重启恢复、多实例横向扩展、单用户并发上限、lease/sweeper 自动回收超时任务，Socket.IO 实时推送排队位置
 - **课程工具模块**：基于教案/大纲自动生成 PPT、习题、课堂练习，内置多个子工具（Outline / PPT / Exercises / Practice / 知识漫画 / 英语卡片）。其中 PPT 走**本地两阶段豆包深度生成**：先生成 15-25 页结构化大纲，再以 8 并发为每页生成富文本 bullets + 主讲稿，最后由 `python-pptx` 用 12 种内置版式渲染（不依赖任何第三方 PPT 插件，完全可控）；另提供 **HTML 网页版 PPT + 在线预览**（guizang 风格多套「版式体系」主题）
 - **知识漫画 & 英语学习卡片**：`知识漫画` 由 AI 产出分镜脚本并渲染为自包含交互 HTML；`英语学习卡片` 生成结构化单词卡 HTML。二者均支持**豆包 Seedream 文生图配图**（`DOUBAO_IMAGE_MODEL` 开启时按分镜/单词并发生成 base64 图片内嵌，关闭时优雅降级为纯文本）
-- **导出/下载付费闸门**：普通用户导出/下载材料前需消耗导出额度（`users.export_credits`）；管理员 `lzf`/`ys` 与白名单（`export_pay_exempt`）豁免。支持 **V免签自动确认** 与 **扫码+「我已支付」→临时额度+邮件通知人工补额** 两种方式（详见「付费闸门」章节）
+- **导出/下载付费闸门**：普通用户导出/下载材料前需消耗导出额度（`users.export_credits`）；管理员 `lzf`/`ys` 与白名单（`export_pay_exempt`）豁免。充值走 **扫码 +「我已支付」→ 临时额度 + 邮件通知管理员确认/改额度**（详见「付费闸门」章节）
 - **教案可见性分级**：除管理员 `ys`/`lzf` 外，其他用户在**优秀教案生成完成前看不到初步教案**（含快速模式），也不能导出；原初步教案位置改为展示教学环节、AI 教师意见/投票、教案信息、支架式教学，以及点击环节时的详情结果，并单独提供「专家分析」右侧详情 Tab
 - **教材接地（ChinaTextbook）**：创建教案时可级联选择「学段 / 学科 / 版本 / 教材 / 章节」，作为 `lesson_plans.textbook_ref` 注入生成上下文（仅内置目录元数据 + 外链，不分发教材文件）
 - **通用 AI 教师标准 + K12 + 特殊教育**：所有内容生成 agent 注入统一「AI 教师标准」基线；K12 教案叠加 K12 教学法（对齐国内课标）；识别到特教场景自动叠加特殊教育教案专项标准
@@ -69,7 +71,9 @@ EduSymphony/
 ├── supabase_zhuke_export_index.sql  珠科教案 /zhuke/history 查询的 partial index（可选，性能优化）
 ├── supabase_export_payment_migration.sql 付费闸门（users.export_credits/export_pay_exempt + payment_orders）
 ├── supabase_textbook_ref_migration.sql 教材接地（lesson_plans.textbook_ref）
-├── vmq/                             V免签支付服务（PHP + 独立 MySQL，含 Dockerfile/vmq.sql）
+├── supabase_zhuke_materials_migration.sql 珠科材料助手（can_zhuke_materials + zhuke_material_projects）
+├── supabase_zhuke_materials_assets_migration.sql 珠科材料→HTML/PPT 列（material_html_path / ppt_path 等）
+├── backend/templates/zhuke_materials/ 珠科材料助手官方模版（大纲/日历/教案）
 ├── deploy.ps1 / deploy.bat / deploy.sh 一键全栈部署脚本（Windows / Linux）
 ├── docker-compose.yml               本地开发双容器（backend + frontend）
 ├── docker-compose.coolify.yml       生产单容器（Nginx + Supervisor）
@@ -129,8 +133,11 @@ Phase 3: 生成优化教案（整合初步教案 + 各环节专家最佳建议�
 > 13. `supabase_zhuke_export_index.sql` —— **可选**：珠科教案 `/zhuke/history` 查询的两条 partial index（按 `source_kind='zhuke_generation'` 过滤，比通用索引小 90%+），用户量大时建议执行  
 > 14. `supabase_export_payment_migration.sql` —— **付费闸门**：为 `users` 追加 `export_credits`（INT，默认 0）+ `export_pay_exempt`（BOOL，默认 false），并建 `payment_orders` 订单表 + 索引  
 > 15. `supabase_textbook_ref_migration.sql` —— **教材接地**：为 `lesson_plans` 追加 `textbook_ref`（VARCHAR(300)），记录所选 ChinaTextbook 教材/章节  
+> 16. `supabase_zhuke_materials_migration.sql` —— **珠科材料助手**：`users.can_zhuke_materials`（默认 FALSE）+ 表 `zhuke_material_projects`  
+> 17. `supabase_zhuke_materials_assets_migration.sql` —— 珠科材料「教学材料 HTML + PPT」产物列（已有第 16 步表结构时补跑）  
 >
-> （若从零建库直接跑 `supabase_schema.sql` 即已含以上 14/15 的列与表；上述迁移用于**已有库增量升级**。）  
+> （若从零建库直接跑最新 `supabase_schema.sql`，已含能力列、付费表与 `zhuke_material_projects`；上述迁移用于**已有库增量升级**。）  
+> **升级检查**：已有库若未跑第 **16** 步，后端会因缺 `users.can_zhuke_materials` 在 startup 失败——请立刻执行 `supabase_zhuke_materials_migration.sql`。启用「生成教学材料与 PPT」前再跑第 **17** 步。  
 >
 > **密钥与安全**：真实数据库连接串、AI Key、`JWT_SECRET` 等只放在部署环境的 `.env`（或密钥管理）中；仓库内 `config.py` 默认值与 `.env.example` 仅为占位。**不要将生产账号、密码或 Key 写入 README、Issue 或提交到 Git。**
 
@@ -211,15 +218,16 @@ docker compose -f docker-compose.coolify.yml up -d --build
 ```
 
 **部署注意**：
-- 必须先在 Supabase 按顺序跑完上述 **7** 个 SQL 脚本（见上方快速开始）；**建议**再执行一次可选的 **`supabase_safe_run.sql`** 做 `access_level` 保守加固（见第 8 步说明）
+- 必须先在 Supabase 按「快速开始」跑完 SQL（至少核心 1–7 步）；**已有库升级务必执行第 16 步** `supabase_zhuke_materials_migration.sql`（缺 `can_zhuke_materials` 会导致后端无法启动）
+- **建议**再执行一次可选的 **`supabase_safe_run.sql`** 做 `access_level` 保守加固（见第 8 步说明）
 - 单容器构建见根目录 `Dockerfile`：需 **BuildKit**；Coolify / CI 失败时可 `DOCKER_BUILDKIT=1 docker compose -f docker-compose.coolify.yml build --no-cache`
 - `DATABASE_URL` 推荐 Transaction Pooler (端口 6543) 以获得最佳并发
 - 多实例横向扩容时，`queue_jobs` 表自动在实例间分派任务（`SELECT FOR UPDATE SKIP LOCKED`），无需额外配置
 - Coolify 更新镜像失败时，使用「Force rebuild (no cache)」避免 pip 层缓存
 
-### 方式五：一键全栈部署脚本（含 V免签）
+### 方式五：一键全栈部署脚本
 
-仓库根目录提供一键脚本，自动起「前端 + 后端 + V免签(vmq) + V免签 MySQL(vmq-db)」全栈：
+仓库根目录提供一键脚本，自动起「前端 + 后端」全栈：
 
 ```bash
 # Windows：双击 deploy.bat，或 PowerShell 执行
@@ -229,7 +237,7 @@ docker compose -f docker-compose.coolify.yml up -d --build
 bash deploy.sh      # docker compose -f docker-compose.coolify.yml up -d --build → 等待就绪 → 打印地址
 ```
 
-> V免签为 PHP 服务（`vmq/`）+ 独立 MySQL（`vmq-db`），已随两个 compose 文件内置（含健康检查、初始化 `vmq/vmq.sql`）。后台默认账号见 `vmq/vmq.sql` 的 `setting` 种子（**部署后请立即改密，勿把生产账号密码写入 README/Git**）。后端容器内 `VMQ_BASE_URL` 走容器网络 `http://vmq:80`；`VMQ_NOTIFY_BASE` 填我方公网可达域名。
+> 付费闸门无需额外服务：配置静态收款码 `ALIPAY_QR` / `WECHAT_QR` 与 SMTP，用户「我已支付」后邮件通知管理员确认额度即可。
 
 ## 环境变量 (`.env`)
 
@@ -239,23 +247,37 @@ bash deploy.sh      # docker compose -f docker-compose.coolify.yml up -d --build
 
 | 变量 | 说明 |
 |------|------|
-| `QWEN_API_KEY` / `QWEN_MODEL` | 通义千问（默认分配给「教案优化专家」） |
-| `QWEN_VL_MODEL` | 视觉/多模态模型（立体几何「上传题目图片解题」入口用），走同一 DashScope 兼容通道；默认 `qwen-vl-max` |
+| `QWEN_API_KEY` / `QWEN_MODEL` | 通义千问（默认分配给「教案优化专家」；默认 `qwen3.8-max`） |
+| `QWEN_VL_MODEL` | 视觉/多模态模型（立体几何「上传题目图片解题」入口用），走同一 DashScope 兼容通道；默认 `qwen3.7-plus` |
 | `DOUBAO_IMAGE_MODEL` | 文生图模型（英语卡片 / 知识漫画配图）。**留空 = 关闭配图**（仅出文本）；填 Seedream 模型 id 开启（已验证 `doubao-seedream-4-0-250828`），走豆包方舟 `/images/generations` 返回 base64 内嵌进 HTML |
-| `KIMI_API_KEY` / `KIMI_MODEL` | Kimi（默认分配给「学生参与专家」） |
-| `KIMI_K2_MODEL` | 珠科教案助手专用 Kimi 模型（默认回退 `KIMI_MODEL` / `kimi-k2-0905-preview`），与 `KIMI_API_KEY` 共用密钥 |
+| `KIMI_API_KEY` / `KIMI_MODEL` | Kimi（默认分配给「学生参与专家」；默认 `kimi-k2.6`） |
+| `KIMI_K2_MODEL` | 珠科教案助手专用 Kimi 模型（默认回退 `KIMI_MODEL` / `kimi-k2.6`），与 `KIMI_API_KEY` 共用密钥 |
 | `KIMI_K2_CONCURRENCY` | 珠科 `zhuke_lesson_single` 单用户并行 Kimi SubAgent 上限（默认 4，可在 `.env` 调高） |
 | `KIMI_K2_TIMEOUT_SEC` | 珠科 Kimi 单次 API 超时（秒，默认 120） |
 | `ZHUKE_LAYOUT_REVIEW_ON_LINT` | lint 失败时是否走 Kimi 排版质检（默认关） |
 | `ZHUKE_LAYOUT_REVIEW_ALWAYS` | 强制每节都走排版质检（默认关；开启后 API 调用量翻倍） |
 | `ZHUKE_LESSON_LEASE_SEC` | 珠科单课租约下限（秒）；实际取 `max(此值, TASK_TIMEOUT_SEC)`，默认 600 |
 | `SOFFICE_PATH` | LibreOffice `soffice` 绝对路径（裸机 Windows/macOS；Docker 已内置，自动探测） |
-| `DOUBAO_API_KEY` / `DOUBAO_MODEL` | 豆包 Chat（默认分配给「创新教学专家」，同时驱动课程工具的大纲/PPT/风格分析；PPT 走两阶段深度思考链路） |
+| `DOUBAO_API_KEY` / `DOUBAO_MODEL` | 豆包 Chat（默认分配给「创新教学专家」，默认 `doubao-seed-2-1-pro-260628`；同时驱动课程工具的大纲/PPT/风格分析；PPT 走两阶段深度思考链路） |
 | ~~`DOUBAO_PPT_BOT_ID` / `DOUBAO_PPT_BOT_TIMEOUT`~~ | **已弃用**。早期火山方舟 PPT 智能体路线已由本地两阶段豆包深度生成取代；该变量保留只为兼容现有 `.env`，配了也不会被读取 |
 | ~~`COZE_API_KEY` / `COZE_BOT_ID` / `COZE_BASE_URL` / `COZE_PPT_TIMEOUT` / `COZE_POLL_INTERVAL`~~ | **已弃用**。Coze Bot 内置的 aippt 等第三方 PPT 插件返回的是营销页面 URL（不是真 .pptx 二进制），实测无法落地课堂可用文件，已从 `_do_ppt` 调用链中移除；保留环境变量字段仅为兼容已部署实例的 `.env`，配置不会再生效。未来如改走 Coze **Workflow** API（不是 Bot），会另起独立配置 |
-| `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` | DeepSeek（默认分配给「深度学习专家」） |
-| `SPARK_API_KEY` / `SPARK_MODEL` | 讯飞星火（默认分配给「认知发展专家」） |
+| `DEEPSEEK_API_KEY` / `DEEPSEEK_MODEL` | DeepSeek（默认分配给「深度学习专家」；默认 `deepseek-v4-pro`；珠科材料助手正文亦依赖此密钥） |
+| `ZHUKE_MATERIALS_DEEPSEEK_MODEL` | 珠科材料助手专用模型（默认 `deepseek-v4-pro`；可用 flash 等覆盖） |
+| `SPARK_API_KEY` / `SPARK_MODEL` | 讯飞星火（默认分配给「认知发展专家」；默认 `4.0Ultra`；若账号密钥鉴权不兼容可回退 `generalv3.5`） |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` | OpenAI 兼容接口，可选 |
+
+**模型默认值一览**（与 `config.py`、`.env.example`、`docker-compose*.yml` 的 `${VAR:-default}` 一致）：
+
+| 变量 | 默认 |
+|------|------|
+| `QWEN_MODEL` | `qwen3.8-max` |
+| `QWEN_VL_MODEL` | `qwen3.7-plus` |
+| `KIMI_MODEL` / `KIMI_K2_MODEL` | `kimi-k2.6` |
+| `DOUBAO_MODEL` | `doubao-seed-2-1-pro-260628` |
+| `DEEPSEEK_MODEL` / `ZHUKE_MATERIALS_DEEPSEEK_MODEL` | `deepseek-v4-pro` |
+| `SPARK_MODEL` | `4.0Ultra` |
+
+Compose 会显式透传上表默认；仅填 API Key、不写模型名时也会落到这些 ID。无 V免签 / 无第三方自动支付服务。
 
 ### 数据库与云服务
 
@@ -306,30 +328,19 @@ bash deploy.sh      # docker compose -f docker-compose.coolify.yml up -d --build
 | `DB_IDLE_TX_TIMEOUT_MS` | 事务空闲超时（毫秒） | 300000 |
 | `DB_COMMAND_TIMEOUT_SEC` | asyncpg 客户端单命令超时（秒） | 180 |
 
-### 导出/下载付费闸门（V免签 + 邮件补额）
+### 导出/下载付费闸门（扫码 + 邮件补额）
 
-普通用户每次**导出/下载任何材料**前需消耗 1 次导出额度；管理员（`lzf` / `ys`）与被管理员标记 `export_pay_exempt=true` 的白名单账号**完全豁免**。支持两种到账方式（见「付费闸门」章节）。
+普通用户每次**导出/下载任何材料**前需消耗 1 次导出额度；管理员（`lzf` / `ys`）与被管理员标记 `export_pay_exempt=true` 的白名单账号**完全豁免**。到账方式见下方「付费闸门」章节。
 
 | 变量 | 说明 | 默认 |
 |------|------|------|
-| `VMQ_BASE_URL` | V免签 PHP 服务端根地址（内网可达，如 `http://vmq:80`）。**留空 = 不启用 V免签自动确认**，仅走扫码 + 我已支付 | 空 |
-| `VMQ_KEY` | V免签通讯密钥（须与 `vmq/vmq.sql` 中 `setting.key` 一致） | 空 |
-| `VMQ_NOTIFY_BASE` | 我方公网可达回调根；V免签异步通知打到 `{此值}/api/v1/payments/vmq-notify` | 空 |
 | `EXPORT_PRICE` | 单次订单金额（元） | 5 |
-| `EXPORT_CREDITS_PER_ORDER` | 每笔成功订单发放的导出额度 | 1 |
-| `EXPORT_ORDER_TIMEOUT_SEC` | 付费订单前端轮询超时提示（秒） | 300 |
-| `EXPORT_TEMP_CREDITS` | 第二种方式「我已支付」后先发放的**临时额度**（等待人工核对补额） | 1 |
-| `ALIPAY_QR` / `WECHAT_QR` | 支付宝 / 微信收款码内容（前端展示静态码，扫码支付用） | 空 |
-| `ADMIN_PAYMENT_EMAIL` | 「我已支付」后通知人工补额的收件邮箱（备注哪个用户充值） | `778636011@qq.com` |
-| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` | 发件 SMTP 配置（留空 = 跳过邮件通知，仅发放临时额度） | `smtp.qq.com` / `465` / 空 / 空 |
-
-### Docker compose 专用
-
-| 变量 | 说明 | 默认 |
-|------|------|------|
-| `VMQ_HTTP_PORT` | 本地 compose 映射 V免签 HTTP 端口（`host:8080 → vmq:80`） | 8080 |
-| `VMQ_DB_ROOT_PASS` | V免签 MySQL root 密码 | vmqroot123 |
-| `VMQ_DB_PASS` | V免签 MySQL 应用用户密码 | vmqpass123 |
+| `EXPORT_CREDITS_PER_ORDER` | 管理员确认后每笔订单补足到的正式额度 | 1 |
+| `EXPORT_ORDER_TIMEOUT_SEC` | 前端提示用超时秒数 | 300 |
+| `EXPORT_TEMP_CREDITS` | 「我已支付」后先发放的**临时额度**（等待人工核对） | 1 |
+| `ALIPAY_QR` / `WECHAT_QR` | 支付宝 / 微信收款码内容（前端展示静态码） | 空 |
+| `ADMIN_PAYMENT_EMAIL` | 「我已支付」后通知人工补额的收件邮箱 | `778636011@qq.com` |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` | 发件 SMTP（留空 = 跳过邮件，仅发临时额度） | `smtp.qq.com` / `465` / 空 / 空 |
 
 
 
@@ -337,11 +348,9 @@ bash deploy.sh      # docker compose -f docker-compose.coolify.yml up -d --build
 
 **谁需要付费**：普通用户。**豁免**：管理员 `lzf` / `ys`；以及管理员在用户管理页勾选 `export_pay_exempt` 的白名单账号。额度以 `users.export_credits` 记账，每次导出/下载扣 1；额度不足时后端返回 `402 Payment Required`，前端全局拦截并弹出 `PaymentModal`。
 
-**两种到账方式**：
-1. **V免签自动确认**（配置 `VMQ_*` 后启用）：`POST /payments/create` 下单 → 前端展示动态码 → 用户支付 → V免签回调 `/payments/vmq-notify` → 订单置 `paid` 并自动 `export_credits += EXPORT_CREDITS_PER_ORDER`。
-2. **扫码 + 我已支付（邮件补额）**（无需 V免签监控端）：前端展示静态收款码（`ALIPAY_QR` / `WECHAT_QR`）→ 用户支付后点「我已支付」→ `POST /payments/claim` 创建 `pending_review` 订单并立即发放 `EXPORT_TEMP_CREDITS` 临时额度，同时给 `ADMIN_PAYMENT_EMAIL` 发邮件 → 管理员核对后在后台 `POST /payments/{id}/confirm` 正式补额。同一用户存在未确认 `pending_review` 订单时不再重复发放。
+**到账流程**：前端展示静态收款码（`ALIPAY_QR` / `WECHAT_QR`）→ 用户支付后点「我已支付」→ `POST /payments/claim` 创建 `pending_review` 订单并立即发放 `EXPORT_TEMP_CREDITS` 临时额度，同时给 `ADMIN_PAYMENT_EMAIL` 发邮件 → 管理员核对后 `POST /payments/{id}/confirm` 或在用户管理里改 `export_credits`。同一用户存在未确认 `pending_review` 订单时不再重复发放。
 
-**相关表/列**：`users.export_credits`、`users.export_pay_exempt`、`payment_orders`（执行 `supabase_export_payment_migration.sql`）。**V免签服务**：见仓库 `vmq/`（PHP + 独立 MySQL），随 `docker compose` 一起起（`vmq` / `vmq-db` 两个 service，含健康检查）。
+**相关表/列**：`users.export_credits`、`users.export_pay_exempt`、`payment_orders`（执行 `supabase_export_payment_migration.sql`）。
 
 
 
@@ -576,13 +585,25 @@ python scripts/smoke_all_features.py --dry-run --ui --password YOUR_PASS --lesso
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/v1/payments/config` | 获取付费参数（金额、额度、收款码内容） |
-| POST | `/api/v1/payments/create` | 创建 V免签订单（返回支付二维码/链接） |
-| GET | `/api/v1/payments/:id/status` | 轮询订单状态 |
-| GET | `/api/v1/payments/vmq-notify` | V免签异步回调（置 paid + 发放额度） |
+| GET | `/api/v1/payments/:id/status` | 查询订单状态 |
 | POST | `/api/v1/payments/claim` | 「我已支付」：发放临时额度 + 邮件通知人工补额 |
 | POST | `/api/v1/payments/:id/confirm` | 管理员确认订单（人工补额） |
 | POST | `/api/v1/payments/consume` | 前端客户端直连下载时消耗 1 次导出额度 |
 | GET | `/api/v1/payments/orders` | 订单列表（管理员） |
+
+### 珠科材料助手（工作台）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/zhuke-materials/ping` | 权限与 DeepSeek 配置心跳 |
+| POST | `/api/v1/zhuke-materials/detect-mode` | 按文件名启发式判模式 A/B/C |
+| POST | `/api/v1/zhuke-materials/projects` | 创建项目（课名 + 可选附件） |
+| GET | `/api/v1/zhuke-materials/projects/:id` | 项目状态 / JSON 预览 |
+| POST | `/api/v1/zhuke-materials/projects/:id/syllabus` | DeepSeek 大纲 + 填 docx |
+| POST | `/api/v1/zhuke-materials/projects/:id/schedule` | 上课时间门禁（周几+节次） |
+| POST | `/api/v1/zhuke-materials/projects/:id/calendar` | DeepSeek 周次 + 填 xlsx |
+| POST | `/api/v1/zhuke-materials/projects/:id/lessons` | DeepSeek 教案 + 填 docx |
+| GET | `/api/v1/zhuke-materials/projects/:id/download` | ZIP 三件套（受付费闸门） |
 
 ### 讨论
 
